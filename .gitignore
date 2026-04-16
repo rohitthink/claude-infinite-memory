@@ -1,0 +1,54 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+build/
+dist/
+.venv/
+venv/
+env/
+
+# SQLite runtime artifacts (users' local DBs; never commit)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+*.log.*
+logs/
+
+# Runtime state (lockfiles, spool, reconciled records)
+sync-active/
+sync-spool/
+sync-state/
+reconciled.txt
+
+# Environment files
+.env
+.env.*
+*.secret
+
+# Archive artifacts
+*.tar.gz
+*.zip

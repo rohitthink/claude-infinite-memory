@@ -1,0 +1,75 @@
+#!/bin/bash
+# config.template.sh — environment template for claude-infinite-memory.
+#
+# Copy this file to ~/.claude/claude-infinite-memory.env (or any location you
+# source from your shell / LaunchAgents) and fill in the paths. Every hook,
+# daemon, and script in this project reads its settings from the exported
+# variables below, so you only configure once.
+#
+# After editing, source it once to verify:
+#   source ./claude-infinite-memory.env && env | grep CLAUDE_BRIDGE
+#
+# The install.sh script will prompt for these values and write them into a
+# config file for you; editing this template directly is for advanced users.
+
+# -----------------------------------------------------------------------------
+# REQUIRED: where Claude Code keeps its state (hooks, projects, logs, spool)
+# -----------------------------------------------------------------------------
+# Default matches the Claude Code CLI convention. Override if you keep your
+# Claude Code home on an external volume or in a non-default location.
+export CLAUDE_BRIDGE_HOME="${CLAUDE_BRIDGE_HOME:-$HOME/.claude}"
+
+# -----------------------------------------------------------------------------
+# REQUIRED: path to your Obsidian vault
+# -----------------------------------------------------------------------------
+# The hooks and daemons read/write inside this directory. Must be an existing
+# directory (the install script validates this). On macOS the common patterns
+# are:
+#   ~/Documents/Obsidian/MyVault
+#   ~/Library/Mobile Documents/iCloud~md~obsidian/Documents/MyVault
+#   /Volumes/ExternalDrive/Obsidian/MyVault
+export CLAUDE_BRIDGE_VAULT="${CLAUDE_BRIDGE_VAULT:-$HOME/Documents/Obsidian/MyVault}"
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: Ollama endpoint for the semantic-search MCP server (L3)
+# -----------------------------------------------------------------------------
+# The indexer embeds chunks with nomic-embed-text via Ollama. It auto-tries:
+#   1. $CLAUDE_BRIDGE_OLLAMA_HOST (if set)
+#   2. http://localhost:11434
+# If neither responds, the indexer falls back to a deterministic hash
+# pseudo-embedder so the pipeline never blocks. Semantic search will be poor
+# under the fallback.
+export CLAUDE_BRIDGE_OLLAMA_HOST="${CLAUDE_BRIDGE_OLLAMA_HOST:-http://localhost:11434}"
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: path to the `claude` CLI binary
+# -----------------------------------------------------------------------------
+# Homebrew installs to /opt/homebrew/bin/claude on Apple Silicon. If you
+# installed via npm/yarn, adjust accordingly. The SessionEnd hook shells out
+# to this binary with `-p` to run the obsidian-sync skill headlessly.
+export CLAUDE_BRIDGE_CLAUDE_BIN="${CLAUDE_BRIDGE_CLAUDE_BIN:-/opt/homebrew/bin/claude}"
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: path to Python 3.10+ for the MCP server
+# -----------------------------------------------------------------------------
+# The MCP SDK requires Python >= 3.10. macOS ships with 3.9 at /usr/bin/python3,
+# so Homebrew's python is usually the right choice.
+export CLAUDE_BRIDGE_PYTHON="${CLAUDE_BRIDGE_PYTHON:-/opt/homebrew/bin/python3}"
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: TrueNAS / remote backup target for the rsync daemon
+# -----------------------------------------------------------------------------
+# Leave empty to disable the TrueNAS backup daemon. If set, expects passwordless
+# SSH configured (~/.ssh/config with BatchMode-capable host entry). The
+# remote path must be a directory the SSH user can write to.
+export CLAUDE_BRIDGE_TRUENAS_HOST="${CLAUDE_BRIDGE_TRUENAS_HOST:-}"
+export CLAUDE_BRIDGE_TRUENAS_PATH="${CLAUDE_BRIDGE_TRUENAS_PATH:-}"
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: reverse-DNS prefix used in LaunchAgent plist labels
+# -----------------------------------------------------------------------------
+# Plist labels look like `com.example.obsidian-reconciliation`. Change this to
+# your own reverse-DNS (e.g. `com.github.<yourhandle>`) to avoid collisions if
+# you use other people's LaunchAgents under com.example.*. The install script
+# will rewrite the plist templates using this value.
+export CLAUDE_BRIDGE_LABEL_PREFIX="${CLAUDE_BRIDGE_LABEL_PREFIX:-com.example}"

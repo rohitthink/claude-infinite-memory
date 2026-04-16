@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent plist template for the vault compaction daemon.
+
+  Runs on the 1st of every month at 03:00 local time.
+
+  Before loading, substitute:
+    {{LABEL_PREFIX}}      reverse-DNS prefix, e.g. com.github.yourhandle
+    {{DAEMON_PATH}}       absolute path to compaction-daemon.sh
+    {{CLAUDE_BRIDGE_HOME}} absolute path, e.g. /Users/you/.claude
+    {{CLAUDE_BRIDGE_VAULT}} absolute path to your Obsidian vault
+    {{CLAUDE_BIN}}        absolute path to claude CLI
+
+  The install.sh script performs these substitutions automatically.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{{LABEL_PREFIX}}.vault-compaction</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{{DAEMON_PATH}}</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Day</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>Nice</key>
+    <integer>10</integer>
+
+    <key>LowPriorityBackgroundIO</key>
+    <true/>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>{{CLAUDE_BRIDGE_HOME}}/logs/compaction-launchd.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{{CLAUDE_BRIDGE_HOME}}/logs/compaction-launchd.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>CLAUDE_BRIDGE_HOME</key>
+        <string>{{CLAUDE_BRIDGE_HOME}}</string>
+        <key>CLAUDE_BRIDGE_VAULT</key>
+        <string>{{CLAUDE_BRIDGE_VAULT}}</string>
+        <key>CLAUDE_BRIDGE_CLAUDE_BIN</key>
+        <string>{{CLAUDE_BIN}}</string>
+    </dict>
+</dict>
+</plist>

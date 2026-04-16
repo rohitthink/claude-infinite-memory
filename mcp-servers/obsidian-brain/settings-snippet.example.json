@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "obsidian-brain": {
+      "command": "/opt/homebrew/bin/python3",
+      "args": [
+        "${HOME}/.claude/mcp-servers/obsidian-brain/server.py"
+      ],
+      "env": {
+        "CLAUDE_BRIDGE_HOME": "${HOME}/.claude",
+        "CLAUDE_BRIDGE_VAULT": "${HOME}/Documents/Obsidian/MyVault",
+        "CLAUDE_BRIDGE_OLLAMA_HOST": "http://localhost:11434"
+      }
+    }
+  }
+}

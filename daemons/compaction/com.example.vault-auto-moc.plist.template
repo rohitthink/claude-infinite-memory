@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent plist template for the weekly auto-MOC daemon.
+
+  Runs every Sunday at 04:00 local time.
+
+  Before loading, substitute:
+    {{LABEL_PREFIX}}      reverse-DNS prefix, e.g. com.github.yourhandle
+    {{DAEMON_PATH}}       absolute path to auto-moc-daemon.sh
+    {{CLAUDE_BRIDGE_HOME}} absolute path, e.g. /Users/you/.claude
+    {{CLAUDE_BRIDGE_VAULT}} absolute path to your Obsidian vault
+
+  The install.sh script performs these substitutions automatically.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{{LABEL_PREFIX}}.vault-auto-moc</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{{DAEMON_PATH}}</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>Nice</key>
+    <integer>10</integer>
+
+    <key>LowPriorityBackgroundIO</key>
+    <true/>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>{{CLAUDE_BRIDGE_HOME}}/logs/compaction-launchd.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{{CLAUDE_BRIDGE_HOME}}/logs/compaction-launchd.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>CLAUDE_BRIDGE_HOME</key>
+        <string>{{CLAUDE_BRIDGE_HOME}}</string>
+        <key>CLAUDE_BRIDGE_VAULT</key>
+        <string>{{CLAUDE_BRIDGE_VAULT}}</string>
+    </dict>
+</dict>
+</plist>

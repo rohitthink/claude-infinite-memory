@@ -1,0 +1,57 @@
+# Vault topic map for SessionStart context-aware retrieval (L1).
+#
+# Each rule: if the hook's `cwd` contains any of the `cwd_contains` substrings,
+# inject the listed vault files (paths relative to vault root).
+# Rules evaluate top-to-bottom; first match wins. Fallback at bottom.
+#
+# IMPORTANT: parsed by a hand-rolled awk parser in session-start-vault-context.sh.
+# Stick to this minimal shape (no nested keys beyond what's shown, no anchors,
+# no multi-doc markers). Lines starting with `#` are comments and are ignored.
+#
+# The hook ALWAYS injects the following as baseline context in addition to the
+# matched rule's `include:` list:
+#   - Last 1 Session Log entry (per-device file, picked dynamically)
+#   - Last 2 Technical Learnings (from 07 - Claude Knowledge/Technical Learnings.md)
+#   - 07 - Claude Knowledge/User Profile.md (L2's accumulated preferences)
+# So rules should NOT re-list those three files.
+#
+# Total payload is capped at ~9KB; files beyond the budget get truncated with
+# a "[... truncated for length ...]" marker.
+#
+# These are examples — edit them for your actual projects. Each rule name is
+# free-form (shown in the injected context block for debugging). The
+# cwd_contains list is what the hook substring-matches against the session's
+# working directory. The fallback rule at the bottom catches everything else.
+
+rules:
+  - name: ProjectA
+    cwd_contains: [project-a, ProjectA, projectA]
+    include:
+      - "_Maps/Dashboard.md"
+      - "02 - Projects/ProjectA/Overview.md"
+
+  - name: ProjectB
+    cwd_contains: [project-b, ProjectB, projectB]
+    include:
+      - "_Maps/Dashboard.md"
+      - "02 - Projects/ProjectB/Overview.md"
+      - "01 - Clients/ProjectB Client/Brand Voice.md"
+
+  - name: ProjectC
+    cwd_contains: [project-c, ProjectC, projectC]
+    include:
+      - "_Maps/Dashboard.md"
+      - "02 - Projects/ProjectC/Overview.md"
+      - "07 - Claude Knowledge/Automation Stack.md"
+
+  - name: Claude config / hooks
+    cwd_contains: [.claude, Claude-Sync, claude-infinite-memory]
+    include:
+      - "_Maps/Dashboard.md"
+      - "07 - Claude Knowledge/Automation Stack.md"
+
+  - name: fallback
+    cwd_contains: ["*"]
+    include:
+      - "_Maps/Dashboard.md"
+      - "_Maps/Project Status Map.md"

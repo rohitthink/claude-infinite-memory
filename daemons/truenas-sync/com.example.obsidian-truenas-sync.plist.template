@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent plist template for the remote backup (TrueNAS / any SSH host) sync.
+
+  Runs in --watch mode for continuous near-real-time backup.
+
+  Before loading, substitute:
+    {{LABEL_PREFIX}}         reverse-DNS prefix, e.g. com.github.yourhandle
+    {{DAEMON_PATH}}          absolute path to obsidian-truenas-sync.sh
+    {{CLAUDE_BRIDGE_HOME}}    absolute path, e.g. /Users/you/.claude
+    {{CLAUDE_BRIDGE_VAULT}}   absolute path to your Obsidian vault
+    {{TRUENAS_HOST}}          SSH host/alias (must be passwordless-capable)
+    {{TRUENAS_PATH}}          remote directory path (trailing slash recommended)
+
+  The install.sh script performs these substitutions automatically.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{{LABEL_PREFIX}}.obsidian-truenas-sync</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{{DAEMON_PATH}}</string>
+        <string>--watch</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>10</integer>
+
+    <key>LowPriorityBackgroundIO</key>
+    <true/>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>{{CLAUDE_BRIDGE_HOME}}/logs/truenas-sync-stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{{CLAUDE_BRIDGE_HOME}}/logs/truenas-sync-stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>CLAUDE_BRIDGE_HOME</key>
+        <string>{{CLAUDE_BRIDGE_HOME}}</string>
+        <key>CLAUDE_BRIDGE_VAULT</key>
+        <string>{{CLAUDE_BRIDGE_VAULT}}</string>
+        <key>CLAUDE_BRIDGE_TRUENAS_HOST</key>
+        <string>{{TRUENAS_HOST}}</string>
+        <key>CLAUDE_BRIDGE_TRUENAS_PATH</key>
+        <string>{{TRUENAS_PATH}}</string>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+</dict>
+</plist>
