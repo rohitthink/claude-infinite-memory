@@ -16,11 +16,28 @@
 #
 # Usage:
 #   macos-exclusions-setup.sh                 # applies to $CLAUDE_BRIDGE_HOME
+#   macos-exclusions-setup.sh --exclude-vault # also excludes the Obsidian vault
+#                                             # WARNING: disables Finder search
+#                                             # for the entire vault; Obsidian's
+#                                             # own search still works fine.
 #   CLAUDE_BRIDGE_HOME=... macos-exclusions-setup.sh
 
 set -uo pipefail
 
 CLAUDE_BRIDGE_HOME="${CLAUDE_BRIDGE_HOME:-$HOME/.claude}"
+CLAUDE_BRIDGE_VAULT="${CLAUDE_BRIDGE_VAULT:-}"
+
+# ---- Parse flags ----
+EXCLUDE_VAULT=0
+for arg in "${@:-}"; do
+  case "$arg" in
+    --exclude-vault) EXCLUDE_VAULT=1 ;;
+    --help|-h)
+      sed -n '2,25p' "$0" | sed 's/^# //'
+      exit 0
+      ;;
+  esac
+done
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "This script is macOS-specific. Skipping on non-Darwin."
@@ -59,6 +76,29 @@ for subdir in sync-spool sync-active logs sync-state; do
   fi
 done
 
+# ---- Spotlight: optional vault exclusion ----
+if [[ $EXCLUDE_VAULT == 1 ]]; then
+  if [[ -z "$CLAUDE_BRIDGE_VAULT" ]]; then
+    echo "  WARNING: --exclude-vault requested but CLAUDE_BRIDGE_VAULT is not set; skipping vault exclusion." >&2
+  elif [[ ! -d "$CLAUDE_BRIDGE_VAULT" ]]; then
+    echo "  WARNING: vault path does not exist: $CLAUDE_BRIDGE_VAULT; skipping vault exclusion." >&2
+  else
+    echo ""
+    echo "  WARNING: --exclude-vault will disable Spotlight/Finder search for your entire vault."
+    echo "           Obsidian's built-in search (Cmd+O / Cmd+Shift+F) is NOT affected."
+    echo "           This is irreversible via this script alone; to re-enable Finder search,"
+    echo "           remove the flag file or run: sudo mdutil -i on \"$CLAUDE_BRIDGE_VAULT\""
+    echo ""
+    VAULT_FLAG="$CLAUDE_BRIDGE_VAULT/.metadata_never_index"
+    if [[ ! -f "$VAULT_FLAG" ]]; then
+      touch "$VAULT_FLAG"
+      echo "  created: $VAULT_FLAG (Finder/Spotlight will skip your vault)"
+    else
+      echo "  exists:  $VAULT_FLAG"
+    fi
+  fi
+fi
+
 # ---- Time Machine: tmutil addexclusion ----
 # `tmutil addexclusion -p` marks the path so backups skip it. The -p flag
 # attaches the exclusion to the path itself (sticky, survives path moves).
@@ -85,3 +125,25 @@ echo "Notes:"
 echo "  - Spotlight exclusion takes effect immediately; Time Machine honors it on next backup."
 echo "  - If tmutil exclusion failed, grant Terminal.app Full Disk Access in"
 echo "    System Settings > Privacy & Security > Full Disk Access, then re-run this script."
+
+# ---- Sanity: current Spotlight indexing status ----
+echo ""
+echo "── Spotlight status ─────────────────────────────────────────────────────"
+if command -v mdutil >/dev/null 2>&1; then
+  echo "  CLAUDE_BRIDGE_HOME ($CLAUDE_BRIDGE_HOME):"
+  mdutil -s "$CLAUDE_BRIDGE_HOME" 2>/dev/null | sed 's/^/    /' || echo "    (mdutil unavailable or permission denied)"
+
+  if [[ -n "$CLAUDE_BRIDGE_VAULT" && -d "$CLAUDE_BRIDGE_VAULT" ]]; then
+    echo ""
+    echo "  Vault ($CLAUDE_BRIDGE_VAULT):"
+    mdutil -s "$CLAUDE_BRIDGE_VAULT" 2>/dev/null | sed 's/^/    /' || echo "    (mdutil unavailable or permission denied)"
+    echo ""
+    echo "  Tip: if you want to fully disable Spotlight on the vault (not just exclude it):"
+    echo "    sudo mdutil -i off \"$CLAUDE_BRIDGE_VAULT\""
+    echo "  To re-enable Spotlight on the vault:"
+    echo "    sudo mdutil -i on \"$CLAUDE_BRIDGE_VAULT\""
+  fi
+else
+  echo "  mdutil not found (unexpected on macOS)"
+fi
+echo "─────────────────────────────────────────────────────────────────────────"

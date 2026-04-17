@@ -20,6 +20,76 @@ Several components have macOS-specific quirks worth knowing about.
 
 **Fix**: Place a `.metadata_never_index` empty file in `$CLAUDE_BRIDGE_HOME`. Spotlight will skip the whole tree. `scripts/macos-exclusions-setup.sh` does this automatically.
 
+### When mds gets stuck
+
+On large Obsidian vaults (10k+ files) or after bulk imports, `mds` / `mds_stores` / `mdworker_shared` can behave pathologically beyond normal transcript indexing.
+
+**Three symptoms to watch for**:
+
+1. **CPU spike** — `mds` or `mds_stores` shows 90–100% CPU in Activity Monitor for more than a few minutes. A short burst after a big import is normal; sustained high CPU on a quiescent vault is not.
+2. **Finder slowness** — file opens, search, and Quick Look noticeably lag. This often co-occurs with mds CPU contention.
+3. **Disk churn** — `iotop` or Disk Diag shows continuous high write I/O from `mdworker_shared`. Combined with high CPU, this usually indicates mds is reprocessing the same files in a loop, often triggered by a malformed file (corrupt EXIF, damaged PDF, bad UTF-8) that mdworker can't finish indexing.
+
+**How `scripts/mds-watchdog.sh` catches each**:
+
+The watchdog runs every 15 minutes via its LaunchAgent. It:
+
+- Reads `ps -eo pid,pcpu,etime,comm` and filters for mds processes. If CPU exceeds the threshold (default 90%) **and** the process has been running long enough (default 5 min), it fires a macOS notification and logs a warning to `$CLAUDE_BRIDGE_HOME/logs/mds-watchdog.log`.
+- Checks that `.metadata_never_index` still exists in `$CLAUDE_BRIDGE_HOME`. If the flag was removed (Finder cleanup, sync peer "organize" operation, Time Machine restore), the watchdog recreates it immediately and logs the event.
+- Estimates the Spotlight metadata cache size under `/var/folders/.../com.apple.metadata/`. If the cache exceeds 10 GB **and** mds CPU is high, it fires an additional notification suggesting `mdutil -E`.
+- Writes a heartbeat timestamp to `$CLAUDE_BRIDGE_HOME/sync-state/mds-watchdog-heartbeat.txt` each run, following the same pattern as the TrueNAS sync watchdog (W3).
+
+**Manual recovery sequence**:
+
+1. **Identify the offending vault** (if you have multiple):
+
+   ```bash
+   sudo fs_usage -w mds_stores 2>&1 | head -50
+   ```
+
+   Look for files being opened repeatedly in a short loop.
+
+2. **Erase and rebuild the Spotlight index for the vault** (usually sufficient):
+
+   ```bash
+   sudo mdutil -E "$CLAUDE_BRIDGE_VAULT"
+   ```
+
+   This wipes the index for that volume and rebuilds from scratch. mds CPU will spike briefly while it reindexes, then settle. This is the right first step.
+
+3. **Restart mds entirely** (last resort — invalidates ALL indexes system-wide):
+
+   ```bash
+   sudo launchctl kickstart -k system/com.apple.metadata.mds
+   ```
+
+   Or via the watchdog script:
+
+   ```bash
+   scripts/mds-watchdog.sh --restart-mds
+   ```
+
+   **Warning**: this triggers a full Spotlight reindex across your entire system. On a large vault it can take hours and will cause sustained high CPU. Only use this if `mdutil -E` doesn't help.
+
+4. **Exclude the vault from Spotlight** (if you don't need Finder search on vault files):
+
+   ```bash
+   scripts/macos-exclusions-setup.sh --exclude-vault
+   ```
+
+   Or to disable indexing at the volume level:
+
+   ```bash
+   sudo mdutil -i off "$CLAUDE_BRIDGE_VAULT"
+   ```
+
+**When to ignore vs. when to act**:
+
+- A brief mds CPU spike (< 5 min) right after a large vault import, plugin install, or `git clone` into the vault: **normal — ignore it**.
+- Sustained high CPU (> 15 min) on a quiescent vault where nothing has changed: **act — run `sudo mdutil -E "$CLAUDE_BRIDGE_VAULT"`**.
+- Finder and Quick Look both broken for > 5 min with mds pegged: **act — reindex or restart mds**.
+- The watchdog fires the same notification multiple times over several hours with no improvement: **escalate — consider `--exclude-vault` or `mdutil -i off`**.
+
 ## Time Machine backing up ephemeral state
 
 **Symptom**: Time Machine is slow; backups take longer than expected.

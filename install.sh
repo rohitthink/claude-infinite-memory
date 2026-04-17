@@ -589,6 +589,25 @@ PLISTEOF
     fi
   fi
 
+  # Install mds-watchdog plist (NOT bootstrapped by default — opt-in, same as other plists).
+  if [[ -f "$REPO_DIR/daemons/mds-watchdog/com.example.mds-watchdog.plist.template" ]]; then
+    mkdir -p "$CLAUDE_BRIDGE_HOME/daemons/mds-watchdog"
+    cp "$REPO_DIR/daemons/mds-watchdog/com.example.mds-watchdog.plist.template" \
+       "$CLAUDE_BRIDGE_HOME/daemons/mds-watchdog/"
+    sed \
+      -e "s|{{LABEL_PREFIX}}|${CLAUDE_BRIDGE_LABEL_PREFIX}|g" \
+      -e "s|{{CLAUDE_BRIDGE_HOME}}|${CLAUDE_BRIDGE_HOME}|g" \
+      -e "s|{{CLAUDE_BRIDGE_VAULT}}|${CLAUDE_BRIDGE_VAULT}|g" \
+      -e "s|{{WATCHDOG_PATH}}|$CLAUDE_BRIDGE_HOME/scripts/mds-watchdog.sh|g" \
+      "$REPO_DIR/daemons/mds-watchdog/com.example.mds-watchdog.plist.template" \
+      > "$LA_DIR/${CLAUDE_BRIDGE_LABEL_PREFIX}.mds-watchdog.plist"
+    if /usr/bin/plutil -lint "$LA_DIR/${CLAUDE_BRIDGE_LABEL_PREFIX}.mds-watchdog.plist" >/dev/null 2>&1; then
+      ok "plist valid: ${CLAUDE_BRIDGE_LABEL_PREFIX}.mds-watchdog.plist (NOT bootstrapped)"
+    else
+      warn "plist lint failed: ${CLAUDE_BRIDGE_LABEL_PREFIX}.mds-watchdog.plist"
+    fi
+  fi
+
   if [[ $FLAG_BOOTSTRAP == 0 ]]; then
     echo
     info "LaunchAgents installed to $LA_DIR (NOT bootstrapped)"
@@ -598,7 +617,8 @@ PLISTEOF
         "${CLAUDE_BRIDGE_LABEL_PREFIX}.obsidian-reconciliation" \
         "${CLAUDE_BRIDGE_LABEL_PREFIX}.vault-compaction" \
         "${CLAUDE_BRIDGE_LABEL_PREFIX}.vault-auto-moc" \
-        "${CLAUDE_BRIDGE_LABEL_PREFIX}.obsidian-brain-indexer"; do
+        "${CLAUDE_BRIDGE_LABEL_PREFIX}.obsidian-brain-indexer" \
+        "${CLAUDE_BRIDGE_LABEL_PREFIX}.mds-watchdog"; do
       _f="$LA_DIR/${_plist}.plist"
       [[ -f "$_f" ]] && echo "    launchctl bootstrap gui/\$UID $_f"
     done
@@ -606,6 +626,10 @@ PLISTEOF
       _f="$LA_DIR/${CLAUDE_BRIDGE_LABEL_PREFIX}.obsidian-truenas-sync.plist"
       [[ -f "$_f" ]] && echo "    launchctl bootstrap gui/\$UID $_f"
     fi
+    echo
+    echo "  mds-watchdog: detects stuck Spotlight (mds/mds_stores/mdworker_shared),"
+    echo "    auto-recreates .metadata_never_index if removed, fires macOS notification on pathology."
+    echo "  See docs/macos-specific.md for details."
     echo
     echo "  Or re-run the installer with --bootstrap to have it done automatically."
   fi
