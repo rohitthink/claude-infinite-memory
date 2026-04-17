@@ -29,6 +29,10 @@
 #   - jq is missing from PATH
 #   - Spawned from a nested claude-code child (env recursion guard)
 #   - Source is "compact" or "resume" (context already exists)
+#
+# VERIFICATION: Topic-map containment verified against the shipped example yaml in
+# tests/test-topic-map-containment.sh; adversarial probes (absolute path, parent
+# traversal, Personal folder, symlink escape, missing file) covered in same file.
 
 set -uo pipefail
 
