@@ -152,7 +152,14 @@ what it might need.
 **Safety**: All tool responses pass through the 17-pattern regex redactor
 that mirrors the SessionEnd hook. `get_file` validates paths with realpath
 and rejects anything outside the vault or under `05 - Personal/`.
-`search_vault` rejects obviously-shell-injection queries.
+`search_vault` rejects obviously-shell-injection queries. Read operations
+resolve the full target path with `strict=True` (file must exist); write
+operations resolve only the parent with `strict=True` and apply a basename
+charset whitelist (`WRITE_BASENAME_RE`). This enables new-file creation
+(e.g. `User Profile.md` on first install) while preserving all traversal
+defenses — Unicode NFC normalization, `..`/`.` token rejection, vault
+containment via `os.path.commonpath`, and `BLOCKED_FOLDERS` enforcement
+apply in both modes.
 
 ### L4: Compaction + Maps of Content
 

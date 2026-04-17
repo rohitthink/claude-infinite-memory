@@ -294,23 +294,18 @@ def looks_like_shell_injection(q: str) -> bool:
 # Path validation
 # ---------------------------------------------------------------------------
 
-def secure_resolve_vault_path(requested_path: str) -> Path:
-    """Resolve a vault-relative path securely. Raises ValueError on any containment failure.
+# Charset whitelist for write-mode basenames. Permits spaces, dashes, dots,
+# underscores, parens, brackets, apostrophes — matches Obsidian's default
+# filename conventions. Rejects shell metacharacters, path separators, and
+# leading-dot hidden files.
+WRITE_BASENAME_RE = re.compile(r"^[A-Za-z0-9 _\-.()'\[\]]{1,200}$")
 
-    Hardening steps (each defeats a specific bypass class):
-      1. Reject empty and absolute paths.
-      2. Normalize Unicode to NFC (APFS stores filenames as NFD; without
-         normalization an attacker can submit NFD-composed bytes that bypass
-         a simple string prefix check on BLOCKED_FOLDERS entries stored in NFC).
-      3. Reject traversal tokens (`..`, `.`) before any filesystem call so we
-         don't race symlink swaps.
-      4. Resolve BOTH the vault root and the target to absolute real paths
-         (follows symlinks to their final on-disk target). This closes the
-         "symlink created after indexing" window.
-      5. Verify containment via os.path.commonpath — str.startswith is fragile
-         when one path is a prefix of another (e.g., /vault vs /vault-sibling).
-      6. Apply BLOCKED_FOLDERS to the RESOLVED, NORMALIZED relative path so a
-         symlink aliasing a non-blocked name to a blocked folder still fails.
+
+def _resolve_shared_prelude(requested_path: str) -> tuple[Path, str]:
+    """Shared setup: reject absolute/empty, NFC-normalize, reject traversal.
+
+    Returns (vault_real, normalized_relative). Raises ValueError on failure.
+    Both read and write paths call this before their mode-specific resolution.
     """
     if not requested_path or requested_path.startswith("/"):
         raise ValueError("empty or absolute path rejected")
@@ -320,18 +315,35 @@ def secure_resolve_vault_path(requested_path: str) -> Path:
     parts = Path(normalized).parts
     if any(p in ("..", ".") for p in parts):
         raise ValueError(f"path contains traversal component: {requested_path!r}")
-    # Resolve to absolute real path (follows symlinks to their final target).
     vault_real = VAULT_ROOT.resolve(strict=True)
-    target = (vault_real / normalized).resolve(strict=True)
-    # Verify containment via os.path.commonpath (not str.startswith).
+    return (vault_real, normalized)
+
+
+def _secure_resolve_vault_path_read(requested_path: str) -> Path:
+    """Resolve an EXISTING vault path. Raises on traversal or missing file.
+
+    Hardening steps:
+      1. Reject empty and absolute paths (shared prelude).
+      2. Normalize Unicode to NFC — APFS NFD bypass defense (shared prelude).
+      3. Reject traversal tokens before any filesystem call (shared prelude).
+      4. Resolve target to absolute real path strict=True (file must exist).
+      5. Verify containment via os.path.commonpath (not str.startswith).
+      6. Apply BLOCKED_FOLDERS to resolved, normalized relative path so a
+         symlink aliasing a non-blocked name to a blocked folder still fails.
+
+    Callers: tool_get_file (line ~546), validate_vault_path → tool_recent_entries (line ~601).
+    """
+    vault_real, normalized = _resolve_shared_prelude(requested_path)
+    try:
+        target = (vault_real / normalized).resolve(strict=True)
+    except FileNotFoundError:
+        raise ValueError(f"path does not exist: {requested_path!r}")
     try:
         common = os.path.commonpath([str(vault_real), str(target)])
     except ValueError:
-        # Different drives (not applicable on macOS but future-proofs).
         raise ValueError(f"path outside vault: {requested_path!r}")
     if common != str(vault_real):
         raise ValueError(f"path escapes vault root: {requested_path!r} -> {target}")
-    # BLOCKED folder check — applied to RESOLVED path, normalized.
     target_rel = target.relative_to(vault_real)
     target_rel_str = unicodedata.normalize("NFC", str(target_rel))
     for blocked in BLOCKED_FOLDERS:
@@ -341,15 +353,82 @@ def secure_resolve_vault_path(requested_path: str) -> Path:
     return target
 
 
-def validate_vault_path(rel_path: str) -> Path | None:
+def _secure_resolve_vault_path_write(requested_path: str) -> Path:
+    """Resolve a WRITE-DESTINATION vault path. Target may not yet exist.
+
+    Validates: parent exists and is inside vault, parent not in BLOCKED_FOLDERS,
+    basename matches WRITE_BASENAME_RE (blocks shell metacharacters and hidden files).
+    Returns the joined-but-unresolved target path.
+
+    Hardening steps:
+      1. Reject empty and absolute paths (shared prelude).
+      2. Normalize Unicode to NFC (shared prelude).
+      3. Reject traversal tokens before any filesystem call (shared prelude).
+      4. Validate basename against WRITE_BASENAME_RE charset whitelist.
+      5. Resolve PARENT strict=True (parent directory must exist).
+      6. Verify parent containment via os.path.commonpath.
+      7. Apply BLOCKED_FOLDERS to the resolved parent.
+
+    Callers: future write tools (not yet present — this mode is scaffolded so
+    new write tools don't re-encounter the strict=True wall on first install).
     """
-    Backwards-compatible wrapper around secure_resolve_vault_path. Returns the
-    resolved Path on success, or None on any containment/normalization failure.
-    Used by callers (e.g. tool_recent_entries) that want a boolean-style guard
-    rather than propagating the explicit ValueError chain.
+    vault_real, normalized = _resolve_shared_prelude(requested_path)
+    basename = Path(normalized).name
+    if not WRITE_BASENAME_RE.match(basename):
+        raise ValueError(f"basename rejected (charset/length): {basename!r}")
+    parent_rel = Path(normalized).parent
+    if str(parent_rel) in (".", ""):
+        parent_resolved = vault_real
+    else:
+        try:
+            parent_resolved = (vault_real / parent_rel).resolve(strict=True)
+        except FileNotFoundError:
+            raise ValueError(f"parent directory does not exist: {parent_rel!r}")
+    try:
+        common = os.path.commonpath([str(vault_real), str(parent_resolved)])
+    except ValueError:
+        raise ValueError(f"parent outside vault: {requested_path!r}")
+    if common != str(vault_real):
+        raise ValueError(f"parent escapes vault root: {requested_path!r} -> {parent_resolved}")
+    parent_rel_str = unicodedata.normalize("NFC", str(parent_resolved.relative_to(vault_real)))
+    for blocked in BLOCKED_FOLDERS:
+        blocked_nfc = unicodedata.normalize("NFC", blocked)
+        if parent_rel_str == blocked_nfc or parent_rel_str.startswith(blocked_nfc + os.sep):
+            raise ValueError(f"parent inside blocked folder: {blocked!r}")
+    return parent_resolved / basename
+
+
+def secure_resolve_vault_path(requested_path: str, mode: str = "read") -> Path:
+    """Dispatcher. mode='read' requires target to exist; mode='write' requires
+    parent to exist and basename to match the write charset whitelist.
+
+    Callers:
+      - tool_get_file uses mode='read' (file must exist to be read).
+      - tool_recent_entries uses mode='read' via validate_vault_path.
+      - Future write tools (not yet present) will use mode='write'.
+
+    Omitting mode defaults to 'read' for backward compatibility with existing
+    call sites.
+    """
+    if mode == "read":
+        return _secure_resolve_vault_path_read(requested_path)
+    elif mode == "write":
+        return _secure_resolve_vault_path_write(requested_path)
+    else:
+        raise ValueError(f"unknown mode: {mode!r}")
+
+
+def validate_vault_path(rel_path: str, mode: str = "read") -> Path | None:
+    """Backwards-compatible wrapper around secure_resolve_vault_path.
+
+    Returns the resolved Path on success, or None on any containment/normalization
+    failure. Callers that want a boolean-style guard use this instead of propagating
+    the explicit ValueError chain. Passes mode through to the dispatcher.
+
+    Callers: tool_recent_entries (mode='read', default).
     """
     try:
-        return secure_resolve_vault_path(rel_path)
+        return secure_resolve_vault_path(rel_path, mode=mode)
     except (ValueError, OSError, FileNotFoundError):
         return None
 
