@@ -192,6 +192,54 @@ release_lock() {
   rm -rf "$LOCK" 2>/dev/null || true
 }
 
+# ─── perl_alarm_exec: process-group-aware timeout wrapper ───────────────────
+# Runs a command with an N-second hard timeout. On timeout, the ENTIRE
+# process group (child + any grandchildren it forked) is signaled, not just
+# the direct child PID. This closes an edge case in the simpler predecessor
+# pattern `perl -e 'alarm N; exec @ARGV'`:
+#
+#   - That pattern replaces perl with the command via exec, so SIGALRM at
+#     T+N is delivered to the command's PID. If the command masks SIGALRM
+#     (e.g. network binaries during blocking socket ops) or has forked
+#     grandchildren (ssh ControlMaster, ProxyCommand helpers, rsync
+#     sub-processes), the masked child and any grandchildren can orphan
+#     and leak — consuming PIDs and file descriptors under repeated probes.
+#
+# perl_alarm_exec keeps perl alive as the timeout owner:
+#   - Parent perl forks.
+#   - Child setpgid's itself into its own process group, then execs.
+#   - Parent's $SIG{ALRM} handler calls kill("-TERM", $childpid) —
+#     negative pid = whole process group — then SIGKILL after 500 ms grace.
+#   - Parent exits 124 on timeout, or the child's exit code on normal return.
+#
+# Usage:  perl_alarm_exec <timeout_s> <cmd> [args...]
+# Exit:   command's exit code normally; 124 on timeout; 127 on exec failure.
+perl_alarm_exec() {
+  local timeout_s="$1"; shift
+  "$PERL" -e '
+    use strict;
+    use POSIX qw(setpgid);
+    my $timeout = shift @ARGV;
+    my $pid = fork();
+    die "fork failed: $!" unless defined $pid;
+    if ($pid == 0) {
+      # Child: lead our own process group so the parent can signal the
+      # whole group on timeout, even if $cmd forks further children.
+      setpgid(0, 0);
+      exec(@ARGV) or do { warn "exec failed: $!"; exit 127 };
+    }
+    $SIG{ALRM} = sub {
+      kill("-TERM", $pid);                      # SIGTERM to entire group
+      select(undef, undef, undef, 0.5);         # 500 ms grace
+      kill("-KILL", $pid);                      # SIGKILL if still alive
+      exit 124;                                 # conventional timeout code
+    };
+    alarm $timeout;
+    waitpid($pid, 0);
+    exit($? >> 8);
+  ' "$timeout_s" "$@"
+}
+
 probe_ssh() {
   # Use a raw TCP connect (port 22) so the probe works even if the key has a
   # forced command (e.g. rrsync or a custom wrapper) that disallows
@@ -207,7 +255,9 @@ probe_ssh() {
   # (VPN, captive portal) cannot block indefinitely. On timeout, degrade to a
   # raw TCP probe against the literal REMOTE_HOST string and log the degradation.
   local real_host
-  real_host=$("$PERL" -e 'alarm 5; exec @ARGV' "$SSH" -G "$REMOTE_HOST" 2>/dev/null \
+  # W21: perl_alarm_exec places ssh in its own process group so any hung
+  # ProxyCommand / Match-exec grandchildren are reaped alongside ssh on timeout.
+  real_host=$(perl_alarm_exec 5 "$SSH" -G "$REMOTE_HOST" 2>/dev/null \
     | awk '/^hostname / {print $2; exit}')
   if [[ -z "$real_host" ]]; then
     log_line "WARN: ssh -G alias resolution timed out or failed; degrading to raw TCP probe against $REMOTE_HOST"
@@ -324,7 +374,9 @@ _rsync_run() {
   fi
   rsync_args+=("${VAULT%/}/" "$REMOTE_HOST:$REMOTE_PATH")
 
-  "$PERL" -e 'alarm shift @ARGV; exec @ARGV' "$RSYNC_TIMEOUT_SEC" \
+  # W21: perl_alarm_exec. If the rsync child hangs on a masked signal or
+  # spawns ssh helpers, the entire process group is reaped on timeout.
+  perl_alarm_exec "$RSYNC_TIMEOUT_SEC" \
     "$RSYNC" "${rsync_args[@]}" > "$tmp" 2>&1
   local rc=$?
 

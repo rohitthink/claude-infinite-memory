@@ -6,6 +6,32 @@ Versioning: [Semantic Versioning 2.0.0](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-04-17
+
+### Changed
+
+- **W21**: `daemons/truenas-sync/obsidian-truenas-sync.sh` replaces the
+  `perl -e 'alarm N; exec @ARGV'` timeout pattern with a new
+  `perl_alarm_exec` helper that places the command in its own POSIX
+  process group and signals the ENTIRE group (not just the direct PID)
+  on timeout. Closes a theoretical edge case flagged by an independent
+  audit: if the command masks `SIGALRM` during a blocking socket op, or
+  forks grandchildren (ssh ControlMaster, ProxyCommand, rsync helpers),
+  the predecessor pattern could orphan them under repeated probing. The
+  new helper forks and keeps perl alive as the timeout owner; on
+  timeout it sends `SIGTERM` then `SIGKILL` to the whole group after a
+  500 ms grace. Exit 124 on timeout, command's exit code on normal
+  return. Applied to both `probe_ssh` (5 s) and the main rsync
+  invocation (`RSYNC_TIMEOUT_SEC`). The in-process `IO::Socket::INET`
+  probe is unchanged — no exec, no orphan surface.
+
+### Added
+
+- `tests/test-perl-alarm-timeout.sh` — three assertions on the new
+  helper: normal completion preserves stdout/exit code; timeout exits
+  124 within budget; and critically, a long-running grandchild spawned
+  by the timed-out command is killed (not orphaned).
+
 ## [0.2.0] - 2026-04-17
 
 ### Release tracks
