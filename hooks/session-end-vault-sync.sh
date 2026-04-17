@@ -46,6 +46,14 @@ CLAUDE_BIN="${CLAUDE_BRIDGE_CLAUDE_BIN:-/opt/homebrew/bin/claude}"
 #   unset or "markdown" (default) — skill writes directly to User Profile.md (existing behaviour).
 #   "sqlite"                      — skill outputs JSON; wrapper ingests via sqlite-backend/ingest.sh.
 PREFS_BACKEND="${CLAUDE_BRIDGE_PREFS_BACKEND:-markdown}"
+# CLAUDE_BRIDGE_SESSIONLOG_BACKEND: controls L3 Session Log write path.
+#   unset or "markdown" (default) — skill writes directly to Session Log - <hostname>.md.
+#   "sqlite"                      — skill outputs NDJSON; wrapper ingests via ingest.sh.
+SESSIONLOG_BACKEND="${CLAUDE_BRIDGE_SESSIONLOG_BACKEND:-markdown}"
+# CLAUDE_BRIDGE_TECHLEARN_BACKEND: controls L3 Technical Learnings write path.
+#   unset or "markdown" (default) — skill writes directly to Technical Learnings.md.
+#   "sqlite"                      — skill outputs NDJSON; wrapper ingests via ingest.sh.
+TECHLEARN_BACKEND="${CLAUDE_BRIDGE_TECHLEARN_BACKEND:-markdown}"
 INGEST_SH="${CLAUDE_BRIDGE_HOME}/sqlite-backend/ingest.sh"
 
 LOG_DIR="${CLAUDE_BRIDGE_HOME}/logs"
@@ -283,6 +291,51 @@ SQLite ingest pipeline. Do NOT include any explanatory text inside the JSON bloc
 SQLITE_PREFS_EOF
 fi
 
+# ---- SQLite backend: override Session Log write path ----
+if [[ "$SESSIONLOG_BACKEND" == "sqlite" ]]; then
+  cat >>"$PROMPT_FILE" <<SQLITE_SESSIONLOG_EOF
+
+SQLITE BACKEND MODE (CLAUDE_BRIDGE_SESSIONLOG_BACKEND=sqlite):
+The Session Log write path has been replaced by a SQLite backend.
+DO NOT write to 'Session Log - ${DEVICE_HOST}.md' or any Session Log file in this mode.
+Instead, for each session milestone, emit one NDJSON line (one JSON object per line,
+no pretty-printing) at the very END of your response, after all other markdown output:
+
+{"type":"session_log","entry_date":"YYYY-MM-DD","title":"...","goal":"...","outcome":"...","key_decisions":"...","learnings":"...","links":"..."}
+
+- entry_date: today's date (YYYY-MM-DD format)
+- title, goal, outcome, key_decisions, learnings, links: concise strings (or empty "")
+- Do NOT include session_id or hostname fields — the wrapper injects these.
+- Emit one line per session milestone. If no session milestone applies, emit nothing.
+- These NDJSON lines are machine-processed; do NOT wrap them in a fenced code block.
+SQLITE_SESSIONLOG_EOF
+fi
+
+# ---- SQLite backend: override Technical Learnings write path ----
+if [[ "$TECHLEARN_BACKEND" == "sqlite" ]]; then
+  cat >>"$PROMPT_FILE" <<SQLITE_TECHLEARN_EOF
+
+SQLITE BACKEND MODE (CLAUDE_BRIDGE_TECHLEARN_BACKEND=sqlite):
+The Technical Learnings write path has been replaced by a SQLite backend.
+DO NOT write to 'Technical Learnings.md' in this mode.
+Instead, for each new technical learning, emit one NDJSON line at the very END
+of your response (after all other markdown output, after any session_log NDJSON lines):
+
+{"type":"technical_learning","number":null,"title":"...","problem":"...","solution":"...","applies_to":"..."}
+
+- number: integer if you know the sequence number, or null (DB auto-assigns)
+- Do NOT include session_id — the wrapper injects it.
+- Emit one line per new technical learning. If none, emit nothing.
+- These NDJSON lines are machine-processed; do NOT wrap them in a fenced code block.
+SQLITE_TECHLEARN_EOF
+fi
+
+# ---- Determine if we need to capture output (any sqlite backend active) ----
+CAPTURE_OUTPUT=0
+[[ "$PREFS_BACKEND"      == "sqlite" ]] && CAPTURE_OUTPUT=1
+[[ "$SESSIONLOG_BACKEND" == "sqlite" ]] && CAPTURE_OUTPUT=1
+[[ "$TECHLEARN_BACKEND"  == "sqlite" ]] && CAPTURE_OUTPUT=1
+
 # ---- Wrapper with flock + timeout + mount pre-flight ----
 cat >"$WRAPPER" <<WRAPPER_EOF
 #!/bin/bash
@@ -302,9 +355,13 @@ PROMPT_FILE='$PROMPT_FILE'
 REDACTED_TRANSCRIPT='$REDACTED_TRANSCRIPT'
 WRAPPER='$WRAPPER'
 SESSION_ID='$SESSION_ID'
+DEVICE_HOST='$DEVICE_HOST'
 REASON='$REASON'
 CLAUDE_BIN='$CLAUDE_BIN'
 PREFS_BACKEND='$PREFS_BACKEND'
+SESSIONLOG_BACKEND='$SESSIONLOG_BACKEND'
+TECHLEARN_BACKEND='$TECHLEARN_BACKEND'
+CAPTURE_OUTPUT='$CAPTURE_OUTPUT'
 INGEST_SH='$INGEST_SH'
 SPOOL_DIR='$SPOOL_DIR'
 TIMESTAMP_TAG='$TIMESTAMP_TAG'
@@ -318,7 +375,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-log "=== Sync start | session=\$SESSION_ID reason=\$REASON prefs_backend=\$PREFS_BACKEND ==="
+log "=== Sync start | session=\$SESSION_ID reason=\$REASON prefs=\$PREFS_BACKEND sessionlog=\$SESSIONLOG_BACKEND techlearn=\$TECHLEARN_BACKEND ==="
 
 # Pre-flight vault mount check after sleep
 if [[ ! -d "\$VAULT" ]]; then
@@ -350,11 +407,11 @@ log "lock acquired"
 # child hangs (network stall, model loop, API timeout), SIGALRM kills it.
 PROMPT_CONTENT=\$(cat "\$PROMPT_FILE")
 
-log "invoking claude -p (timeout=300s)"
+log "invoking claude -p (timeout=300s capture_output=\$CAPTURE_OUTPUT)"
 
-if [[ "\$PREFS_BACKEND" == "sqlite" ]]; then
-  # Capture claude -p stdout so we can extract the JSON preference block.
-  # The output is tee'd to the log so nothing is lost.
+RC=0
+if [[ "\$CAPTURE_OUTPUT" -eq 1 ]]; then
+  # Capture stdout so we can extract JSON/NDJSON produced by SQLite backend modes.
   CLAUDE_OUT_FILE="\${SPOOL_DIR}/claude-out-\${SESSION_ID}-\${TIMESTAMP_TAG}.txt"
   /usr/bin/perl -e 'alarm shift @ARGV; exec @ARGV' 300 \\
     "\$CLAUDE_BIN" -p "\$PROMPT_CONTENT" \\
@@ -362,8 +419,8 @@ if [[ "\$PREFS_BACKEND" == "sqlite" ]]; then
   RC=\$?
   cat "\$CLAUDE_OUT_FILE" >> "\$LOG"
 
-  # Extract the JSON preference block (the last ```json ... ``` fenced block in output).
-  if command -v jq >/dev/null 2>&1 && [[ -s "\$CLAUDE_OUT_FILE" ]]; then
+  # ---- Extract + ingest User Profile preferences (PREFS_BACKEND=sqlite) ----
+  if [[ "\$PREFS_BACKEND" == "sqlite" ]] && command -v jq >/dev/null 2>&1 && [[ -s "\$CLAUDE_OUT_FILE" ]]; then
     PREFS_JSON_RAW=\$(perl -0777 -ne \
       'my @m = /\x60\x60\x60json\s*(\{.*?\})\s*\x60\x60\x60/gs; print \$m[-1] if @m' \
       "\$CLAUDE_OUT_FILE" 2>/dev/null || echo "")
@@ -384,7 +441,55 @@ if [[ "\$PREFS_BACKEND" == "sqlite" ]]; then
       log "SQLite prefs: no JSON block found in claude -p output"
     fi
   fi
+
+  # ---- Extract + ingest Session Log NDJSON (SESSIONLOG_BACKEND=sqlite) ----
+  if [[ "\$SESSIONLOG_BACKEND" == "sqlite" ]] && command -v jq >/dev/null 2>&1 && [[ -s "\$CLAUDE_OUT_FILE" ]]; then
+    SL_COUNT=0
+    while IFS= read -r ndjson_line; do
+      [[ -z "\$ndjson_line" ]] && continue
+      # Validate it's a JSON object with type=session_log
+      LINE_TYPE=\$(printf '%s' "\$ndjson_line" | jq -r '.type // ""' 2>/dev/null || echo "")
+      [[ "\$LINE_TYPE" != "session_log" ]] && continue
+
+      # Inject session_id and hostname (override whatever the LLM emitted)
+      ENRICHED=\$(printf '%s' "\$ndjson_line" | jq -c \\
+        --arg sid  "\$SESSION_ID" \\
+        --arg host "\$DEVICE_HOST" \\
+        '. + {session_id:\$sid, hostname:\$host}' 2>/dev/null || echo "")
+
+      if [[ -n "\$ENRICHED" && -x "\$INGEST_SH" ]]; then
+        printf '%s\n' "\$ENRICHED" | "\$INGEST_SH" \\
+          && SL_COUNT=\$((SL_COUNT + 1)) \\
+          || log "WARN: session_log ingest failed for line: \${ndjson_line:0:80}"
+      fi
+    done < "\$CLAUDE_OUT_FILE"
+    log "SQLite session_log: ingested \$SL_COUNT entries session=\$SESSION_ID"
+  fi
+
+  # ---- Extract + ingest Technical Learning NDJSON (TECHLEARN_BACKEND=sqlite) ----
+  if [[ "\$TECHLEARN_BACKEND" == "sqlite" ]] && command -v jq >/dev/null 2>&1 && [[ -s "\$CLAUDE_OUT_FILE" ]]; then
+    TL_COUNT=0
+    while IFS= read -r ndjson_line; do
+      [[ -z "\$ndjson_line" ]] && continue
+      LINE_TYPE=\$(printf '%s' "\$ndjson_line" | jq -r '.type // ""' 2>/dev/null || echo "")
+      [[ "\$LINE_TYPE" != "technical_learning" ]] && continue
+
+      # Inject session_id (override whatever the LLM emitted)
+      ENRICHED=\$(printf '%s' "\$ndjson_line" | jq -c \\
+        --arg sid "\$SESSION_ID" \\
+        '. + {session_id:\$sid}' 2>/dev/null || echo "")
+
+      if [[ -n "\$ENRICHED" && -x "\$INGEST_SH" ]]; then
+        printf '%s\n' "\$ENRICHED" | "\$INGEST_SH" \\
+          && TL_COUNT=\$((TL_COUNT + 1)) \\
+          || log "WARN: technical_learning ingest failed for line: \${ndjson_line:0:80}"
+      fi
+    done < "\$CLAUDE_OUT_FILE"
+    log "SQLite technical_learning: ingested \$TL_COUNT entries session=\$SESSION_ID"
+  fi
+
 else
+  # Default: pipe directly to log (no output capture needed)
   /usr/bin/perl -e 'alarm shift @ARGV; exec @ARGV' 300 \\
     "\$CLAUDE_BIN" -p "\$PROMPT_CONTENT" \\
       --allowedTools "Read,Write,Edit,Glob,Grep,Bash,Skill" >> "\$LOG" 2>&1
