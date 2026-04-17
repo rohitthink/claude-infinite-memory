@@ -152,3 +152,37 @@ All Obsidian files MUST follow these conventions:
 - ALWAYS read a file before writing to it
 - ALWAYS preserve existing wikilinks and frontmatter tags (add to them, don't replace)
 - Keep entries concise — this is a knowledge graph, not a journal
+
+## SQLite Backend Override Mode
+
+> **This section is activated at runtime by the SessionEnd hook wrapper when
+> `CLAUDE_BRIDGE_SESSIONLOG_BACKEND=sqlite` or `CLAUDE_BRIDGE_TECHLEARN_BACKEND=sqlite`
+> is set. You will see explicit instructions appended to your prompt when this mode is
+> active. The instructions below describe the expected JSON format for reference.**
+
+When the hook instructs you to emit JSON instead of writing markdown directly:
+
+### Session Log JSON format (one object per line, NDJSON)
+```json
+{"type":"session_log","entry_date":"YYYY-MM-DD","title":"...","goal":"...","outcome":"...","key_decisions":"...","learnings":"...","links":"..."}
+```
+
+- `entry_date`: ISO date of the session (YYYY-MM-DD). Use today's date.
+- Omit `session_id` and `hostname` — the wrapper injects these from hook context.
+- Emit one line per session milestone. If none, emit nothing for this type.
+
+### Technical Learning JSON format (one object per line, NDJSON)
+```json
+{"type":"technical_learning","number":null,"title":"...","problem":"...","solution":"...","applies_to":"..."}
+```
+
+- `number`: integer sequence number, or `null` if not known (the DB auto-assigns).
+- Omit `session_id` — the wrapper injects it.
+- Emit one line per new technical learning. If none, emit nothing for this type.
+
+### Rules for SQLite backend mode
+- Emit all JSON lines **at the very end** of your response, after all markdown output.
+- One JSON object per line (NDJSON — no pretty-printing, no wrapping array).
+- Do NOT write to `Session Log - <hostname>.md` or `Technical Learnings.md` when in SQLite mode for those types — the wrapper + exporter handles that.
+- You may still write to all other vault files (Project Status Map, Skills Index, etc.) as normal.
+- If no relevant facts exist for a type, emit nothing for that type.

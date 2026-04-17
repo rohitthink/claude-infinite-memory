@@ -195,18 +195,24 @@ prompt telling the model to treat the inline corpus as untrusted data,
 not instructions. The MOC daemon invokes no LLM and therefore has no
 allow-list to narrow.
 
-## Tier 3: SQLite WAL canonical storage (L2 User Profile)
+## Tier 3: SQLite WAL canonical storage (Session Log, Technical Learnings, User Profile)
 
 Three independent audits (Gemini, Grok, Perplexity) converged on the same
 meta-recommendation: machine-generated writes should use SQLite WAL as the
 **canonical store** and markdown as a **derived view**.
 
-L2 User Profile is the first (and highest-priority) consumer because it is the
-highest-frequency write path and the most conflict-prone: multiple concurrent
-sessions can fire `SessionEnd` at the same time, each trying to append to the
-same `User Profile.md`.
+Three vault surfaces are flag-gated to SQLite, each independently:
 
-### Design
+| Surface | Flag | Default | Export cadence |
+|---------|------|---------|----------------|
+| L2 User Profile | `CLAUDE_BRIDGE_PREFS_BACKEND` | `markdown` | Hourly |
+| L3 Session Log | `CLAUDE_BRIDGE_SESSIONLOG_BACKEND` | `markdown` | 15-min |
+| L3 Technical Learnings | `CLAUDE_BRIDGE_TECHLEARN_BACKEND` | `markdown` | 15-min |
+
+All three default to `markdown` — existing behaviour is fully preserved unless
+the user opts in by setting the relevant flag to `sqlite`.
+
+### Design: L2 User Profile
 
 ```
 SessionEnd hook
@@ -234,19 +240,71 @@ SessionEnd hook
         User Profile.md   (derived view; always fully regenerated)
 ```
 
+### Design: L3 Session Log + Technical Learnings
+
+```
+SessionEnd hook
+  │
+  ├─ (CLAUDE_BRIDGE_SESSIONLOG_BACKEND=markdown, default)
+  │     claude -p appends to Session Log - <hostname>.md directly
+  │
+  └─ (CLAUDE_BRIDGE_SESSIONLOG_BACKEND=sqlite)
+        claude -p emits NDJSON lines (one JSON object per session milestone)
+              │
+              ▼
+        session-end wrapper
+              │  scan output lines where type=session_log
+              │  inject session_id + hostname (trusted; LLM not trusted for these)
+              ▼
+        ingest.sh  type=session_log
+              │
+              ▼
+        SQLite WAL  session_log_entries table (FK → sessions)
+              │
+              ▼  (15-min launchd / on-demand)
+        export-to-vault.sh --section meta-project
+              │
+              ▼
+        Session Log - <hostname>.md   (per-device; derived view)
+        [per-device routing PRESERVED — sessions.hostname drives the file name]
+
+  ├─ (CLAUDE_BRIDGE_TECHLEARN_BACKEND=markdown, default)
+  │     claude -p appends to Technical Learnings.md directly
+  │
+  └─ (CLAUDE_BRIDGE_TECHLEARN_BACKEND=sqlite)
+        claude -p emits NDJSON lines (one JSON object per new learning)
+              │
+              ▼
+        session-end wrapper  →  ingest.sh  type=technical_learning
+              │
+              ▼
+        SQLite WAL  technical_learnings table
+              │
+              ▼  (15-min launchd / on-demand)
+        export-to-vault.sh --section meta-project
+              │
+              ▼
+        Technical Learnings.md   (canonical single file; derived view)
+```
+
 ### Key properties
 
-- **Concurrency-safe**: WAL mode + UNIQUE index. Concurrent writers queue
-  atomically; the `ON CONFLICT DO UPDATE` upsert prevents duplicate rows.
-- **Idempotent migration**: `migrate-from-markdown.sh` reads the existing
-  markdown, ingests each bullet once, and renames the original to
-  `.pre-sqlite-backup`. Reruns are safe (UNIQUE index dedups; seen_count++).
-- **Markdown is derived, not authoritative**: `export-to-vault.sh --section
-  user-profile` regenerates the entire file from the DB, deterministically
-  ordered by `first_seen DESC` within each category. The file can be deleted
-  and regenerated at any time with no data loss.
-- **Feature flag default off**: `CLAUDE_BRIDGE_PREFS_BACKEND` defaults to
-  `markdown`. Existing sessions are unaffected until the user opts in.
+- **Concurrency-safe**: WAL mode + FK constraints. Concurrent writers queue
+  atomically; session_log_entries + technical_learnings use autoincrement PKs
+  (no collision risk between writers).
+- **Idempotent migration**: `migrate-meta-project.sh` reads existing Session Log
+  and Technical Learnings markdown, synthesizes deterministic `session_id` values
+  (sha1 of heading slug), inserts via `INSERT OR IGNORE`, renames originals to
+  `.pre-sqlite-backup`. Reruns are safe.
+- **Markdown is derived, not authoritative**: `export-to-vault.sh --full-rebuild`
+  truncates destination files and regenerates from DB. Files can be deleted and
+  rebuilt at any time with no data loss.
+- **Feature flag default off**: all three flags default to `markdown`. Existing
+  sessions are unaffected until the user opts in.
+- **Per-device routing preserved in SQLite mode**: the exporter JOINs
+  `session_log_entries` with `sessions` to get `hostname` for each row, then
+  routes to `Session Log - <hostname>.md`. The canonical `Session Log.md` is
+  never touched by the exporter.
 - **Schema idempotency**: `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT
   EXISTS` mean running `schema.sql` on an existing DB is always a no-op.
 
@@ -254,12 +312,14 @@ SessionEnd hook
 
 | File | Role |
 |------|------|
-| `sqlite-backend/schema.sql` | `user_preferences` table + UNIQUE index |
-| `sqlite-backend/ingest.sh` | `user_preference` + `user_preference_batch` type dispatch; `ingest_preference()` function (sourceable) |
-| `sqlite-backend/export-to-vault.sh` | `--section user-profile` renders full markdown view |
-| `sqlite-backend/migrate-from-markdown.sh` | One-time markdown → SQLite migration |
-| `sqlite-backend/com.example.sqlite-export.plist.template` | Hourly launchd export job template |
-| `hooks/session-end-vault-sync.sh` | Feature-flag detection; modified prompt + wrapper for `sqlite` mode |
+| `sqlite-backend/schema.sql` | `sessions`, `session_log_entries`, `technical_learnings`, `user_preferences` tables + indexes |
+| `sqlite-backend/ingest.sh` | All four type dispatchers; `ingest_preference()` / `sqlq()` (sourceable) |
+| `sqlite-backend/export-to-vault.sh` | `--section user-profile` (hourly), `--section meta-project` (15-min), `--full-rebuild` |
+| `sqlite-backend/migrate-from-markdown.sh` | One-time User Profile markdown → SQLite migration |
+| `sqlite-backend/migrate-meta-project.sh` | One-time Session Log + Technical Learnings markdown → SQLite migration |
+| `sqlite-backend/com.example.sqlite-export.plist.template` | Hourly launchd export job (User Profile) |
+| `sqlite-backend/com.example.sqlite-export-meta-project.plist.template` | 15-min launchd export job (Session Log + Technical Learnings) |
+| `hooks/session-end-vault-sync.sh` | Feature-flag detection; NDJSON drain + ingest for all three sqlite backends |
 
 ## Component inventory
 

@@ -180,6 +180,41 @@ a plain markdown file means the user can:
 **Decision**: `07 - Claude Knowledge/User Profile.md`, four sections,
 append-only, injected at SessionStart. User stays in the driver's seat.
 
+## 2026-Q2  Why per-device routing survives the SQLite migration
+
+**Context**: When `CLAUDE_BRIDGE_SESSIONLOG_BACKEND=sqlite`, session log entries
+no longer flow directly from the skill to `Session Log - <hostname>.md`. Instead
+they pass through SQLite (via `ingest.sh`) and then to markdown (via
+`export-to-vault.sh`). A naive exporter would route all rows to the canonical
+`Session Log.md`, breaking the per-device invariant W1–W5 established.
+
+**Option considered**: drop the per-device routing in SQLite mode — all session
+logs go to a single canonical `Session Log.md`. Since SQLite provides the true
+canonical store, the conflict-copy risk is gone at the write side, so per-device
+files are no longer strictly necessary.
+
+**Why rejected**: the per-device routing invariant was established in 2026-Q1
+for cross-device Obsidian Sync safety: each device writes to its own file so
+cloud sync never sees two devices racing to update the same file. Even though
+SQLite serializes the write, the *rendered markdown file* is still synced by
+Obsidian Sync. If two devices both trigger a 15-min export at the same time,
+they would both write to `Session Log.md`, and Obsidian Sync would still produce
+a conflict copy. Per-device files side-step this entirely: each device only
+writes to *its own* `Session Log - <hostname>.md`, which no other device modifies.
+
+**Decision**: the exporter (`export-to-vault.sh`) JOINs `session_log_entries`
+with `sessions` to retrieve `sessions.hostname` for each row, then routes to
+`Session Log - <hostname>.md`. The `hostname` was captured at `ingest.sh` call
+time by the SessionEnd hook wrapper (not by the LLM — the wrapper injects the
+trusted `$DEVICE_HOST` value). This means the per-device routing is preserved
+with zero reliance on the LLM getting the hostname right.
+
+**Implication**: `Technical Learnings.md` stays canonical (single file). It is
+low-churn (a new learning is added a few times per session at most, not once per
+minute), numbered entries dedup cleanly, and the global mkdir lock is sufficient
+to serialize within a device. Cross-device contention on it is rare enough that
+Obsidian Sync conflict handling is acceptable.
+
 ## 2026-Q1  Why publish this under MIT
 
 MIT is permissive. Anyone can use, modify, redistribute, or fork without
