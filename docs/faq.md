@@ -154,3 +154,56 @@ Not end-to-end, but each component has one:
 - Auto-MOC: `auto-moc-daemon.sh --dry-run`
 - Reconciliation: `obsidian-reconciliation-daemon.sh --test-mode`
 - Consolidate logs: `consolidate-session-logs.sh --dry-run`
+
+### 16. How do I uninstall?
+
+Run the uninstall script that ships with the repo:
+
+```bash
+# Preview what will be removed (no changes made):
+./uninstall.sh --dry-run
+
+# Actually remove everything:
+./uninstall.sh --confirm
+```
+
+The uninstaller removes:
+- Hooks under `$CLAUDE_BRIDGE_HOME/hooks/`
+- MCP server under `$CLAUDE_BRIDGE_HOME/mcp-servers/obsidian-brain/`
+- Skills under `$CLAUDE_BRIDGE_HOME/skills/obsidian-sync/`
+- Daemon scripts under `$CLAUDE_BRIDGE_HOME/daemons/`
+- LaunchAgent plists from `~/Library/LaunchAgents/` (runs `launchctl bootout` first)
+- The env config file (`claude-infinite-memory.env`)
+- SQLite staging backend dir
+- Log directory
+
+It does **not** touch:
+- Your Obsidian vault
+- `~/.claude/settings.json` — remove the `hooks` and `mcpServers.obsidian-brain` entries manually
+- `~/.claude-bridge-backups/` — remove when you are satisfied
+
+### 17. How do I upgrade?
+
+Pull the latest code and re-run the installer. It will detect the existing
+installation and prompt `overwrite / skip / abort`. Choose **overwrite** to
+apply updates; your previous files are backed up to
+`~/.claude-bridge-backups/<timestamp>/` before any overwrite.
+
+```bash
+cd /path/to/claude-infinite-memory
+git pull
+./install.sh
+```
+
+If the update changes the LaunchAgent plists, you will need to re-bootstrap:
+
+```bash
+./install.sh --bootstrap
+```
+
+Alternatively, you can manually bootout + bootstrap the affected agents:
+
+```bash
+launchctl bootout gui/$UID ~/Library/LaunchAgents/com.example.obsidian-reconciliation.plist
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.example.obsidian-reconciliation.plist
+```

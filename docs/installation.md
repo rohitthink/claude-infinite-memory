@@ -52,16 +52,68 @@ source ~/.claude/claude-infinite-memory.env
 ```
 
 The script will:
+- Run pre-flight safety checks (existing install, Claude CLI presence, path safety, admin warning)
 - Validate your vault path exists
+- Back up any existing config/hooks to `~/.claude-bridge-backups/<timestamp>/` before overwriting
 - Copy hooks, scripts, skills, and the MCP server into `$CLAUDE_BRIDGE_HOME`
 - Apply macOS exclusions (Spotlight, Time Machine)
 - Initialize the SQLite backend (optional; empty DB)
 - Run a smoke test of the SessionStart hook
-- Ask whether to bootstrap LaunchAgents (reconciliation, indexer,
-  compaction, auto-MOC, and optionally the remote backup daemon)
-- Print a summary
+- Install LaunchAgent plists to `~/Library/LaunchAgents/` (NOT bootstrapped by default)
+- Merge hook entries into `~/.claude/settings.json`
+- Print a summary with next steps
 
-You can safely re-run `install.sh`; it's idempotent.
+You can safely re-run `install.sh`; it detects existing installs and prompts for
+`overwrite / skip / abort` before touching files.
+
+### Installer flags
+
+| Flag | Effect |
+|------|--------|
+| `--bootstrap` | Also run `launchctl bootstrap` after installing plists |
+| `--yes` | Suppress the admin/root confirmation prompt |
+
+### Enabling LaunchAgents (opt-in)
+
+By default the installer only writes plist files; it does **not** register them
+with launchd. This prevents silently starting background processes on machines
+where you have not consented. To enable the daemons, run the commands printed at
+the end of the installer, or re-run with `--bootstrap`:
+
+```bash
+./install.sh --bootstrap
+```
+
+Or manually:
+
+```bash
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.example.obsidian-reconciliation.plist
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.example.vault-compaction.plist
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.example.vault-auto-moc.plist
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.example.obsidian-brain-indexer.plist
+```
+
+(Replace `com.example` with your `CLAUDE_BRIDGE_LABEL_PREFIX`.)
+
+### Backups
+
+Before any file is overwritten, a copy is saved to:
+
+```
+~/.claude-bridge-backups/<YYYYMMDD-HHMMSS>/
+```
+
+The installer prints the backup path at the end. To restore a file:
+
+```bash
+cp ~/.claude-bridge-backups/<timestamp>/<filename> <original-path>
+```
+
+To discard the backup once you are satisfied:
+
+```bash
+rm -rf ~/.claude-bridge-backups/<timestamp>
+```
 
 ## 4. Wire up Claude Code settings
 
