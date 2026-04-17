@@ -222,6 +222,23 @@ claude-infinite-memory/
     macos-specific.md faq.md            decision-log.md
 ```
 
+## Running tests
+
+```bash
+tests/run-all-tests.sh           # run everything applicable to your OS
+tests/run-all-tests.sh --list    # show what would run + skip reasons
+tests/run-all-tests.sh --verbose # stream each suite's output live
+tests/run-all-tests.sh --only tests/test-mcp-xml-wrap.py  # run one suite
+tests/run-all-tests.sh --skip-macos  # simulate CI (skip macOS-only suites)
+```
+
+Exit code is the count of failed suites (0 = all pass). Skipped suites do
+not contribute to the exit code.
+
+Covers 7 suites: five in `tests/`, plus `sqlite-backend/test-concurrent-writes.sh`
+and `mcp-servers/obsidian-brain/test-server.sh`. New `tests/test-*.sh` and
+`tests/test-*.py` files are auto-discovered on the next run.
+
 ## Status
 
 Production-tested on a single user's daily driver (macOS + Obsidian
