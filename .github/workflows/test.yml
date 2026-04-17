@@ -1,0 +1,70 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-flight runs when a new commit lands on the same branch/PR.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  harness-linux:
+    name: run-all-tests (Linux, macOS-specific suites skipped)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          # Key strategy: prefer a pinned-requirements file if one exists,
+          # else fall back to a hash of the Python surface.
+          key: pip-${{ runner.os }}-${{ hashFiles('**/requirements*.txt', '**/pyproject.toml', 'mcp-servers/obsidian-brain/server.py') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
+
+      - name: Install Python deps (if any)
+        run: |
+          python -m pip install --upgrade pip
+          # Tolerate the absence of any requirements file — the suite is
+          # stdlib-only today. When a future worker adds requirements.txt
+          # or pyproject.toml, this block becomes more meaningful.
+          for f in requirements.txt requirements-dev.txt mcp-servers/obsidian-brain/requirements.txt; do
+            if [[ -f "$f" ]]; then
+              echo "Installing from $f"
+              pip install -r "$f"
+            fi
+          done
+        shell: bash
+
+      - name: Run test harness (Linux, skipping macOS-only suites)
+        run: tests/run-all-tests.sh --skip-macos
+        shell: bash
+
+  # Deferred: macos-latest job. GitHub charges 10× minutes for macOS
+  # runners on private repos. Re-enable once a minutes-budget review
+  # confirms the cost is acceptable OR the repo is public.
+  #
+  # harness-macos:
+  #   name: run-all-tests (macOS, full suite)
+  #   runs-on: macos-latest
+  #   timeout-minutes: 15
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-python@v5
+  #       with: { python-version: '3.12' }
+  #     - run: tests/run-all-tests.sh
+  #       shell: bash
