@@ -59,3 +59,28 @@ CREATE INDEX IF NOT EXISTS idx_tech_learnings_pending
     ON technical_learnings(exported_to_markdown);
 CREATE INDEX IF NOT EXISTS idx_tech_learnings_created
     ON technical_learnings(created_at);
+
+-- L2 User Profile: canonical store for user preferences accumulated across sessions.
+-- Markdown (User Profile.md) is a DERIVED VIEW rendered by export-to-vault.sh.
+-- Concurrent writes are safe: WAL + UNIQUE index deduplicates via upsert.
+CREATE TABLE IF NOT EXISTS user_preferences (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    category        TEXT NOT NULL CHECK(category IN
+                        ('technical','communication','antipattern','tooling','pending','archive')),
+    preference      TEXT NOT NULL,
+    source_session  TEXT,
+    device_host     TEXT,
+    confidence      TEXT CHECK(confidence IN ('low','medium','high')),
+    first_seen      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_reinforced TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    seen_count      INTEGER DEFAULT 1,
+    archived_at     TEXT
+);
+
+-- Dedup guard: (category, preference) is the business key.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pref_unique
+    ON user_preferences(category, preference);
+
+-- Hot-path for export renderer: category + recency sort.
+CREATE INDEX IF NOT EXISTS idx_pref_category_recent
+    ON user_preferences(category, last_reinforced DESC);

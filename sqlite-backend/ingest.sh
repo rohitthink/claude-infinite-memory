@@ -71,6 +71,57 @@ sqlq_int() {
   fi
 }
 
+# ingest_preference(): upsert a single user preference row.
+# Args: category preference [source_session [device_host [confidence [seen_count [last_reinforced]]]]]
+# When last_reinforced is empty, DB default (CURRENT_TIMESTAMP) is used for new rows;
+# ON CONFLICT always bumps last_reinforced to CURRENT_TIMESTAMP regardless.
+ingest_preference() {
+  local category="$1" preference="$2"
+  local session="${3:-}" host="${4:-}" confidence="${5:-}"
+  local seen_count_raw="${6:-1}" last_reinforced="${7:-}"
+
+  local seen_sql lr_sql conf_sql
+  seen_sql=$(sqlq_int "$seen_count_raw")
+  [[ "$seen_sql" == "NULL" || -z "$seen_sql" ]] && seen_sql=1
+
+  if [[ -n "$last_reinforced" ]]; then
+    lr_sql=$(sqlq "$last_reinforced")
+  else
+    lr_sql="CURRENT_TIMESTAMP"
+  fi
+
+  # confidence can be NULL — let the CHECK constraint catch bad values at DB layer.
+  conf_sql=$(sqlq "$confidence")
+
+  local sql
+  sql=$(cat <<SQL
+INSERT INTO user_preferences
+    (category, preference, source_session, device_host, confidence, seen_count, last_reinforced)
+VALUES
+    ($(sqlq "$category"), $(sqlq "$preference"), $(sqlq "$session"), $(sqlq "$host"),
+     $conf_sql, $seen_sql, $lr_sql)
+ON CONFLICT(category, preference) DO UPDATE SET
+    last_reinforced = CURRENT_TIMESTAMP,
+    seen_count      = seen_count + 1,
+    confidence      = CASE
+        WHEN excluded.confidence = 'high' THEN 'high'
+        WHEN confidence          = 'high' THEN 'high'
+        ELSE COALESCE(excluded.confidence, confidence)
+    END;
+SQL
+)
+  if ! printf '%s\n' "$sql" | "$SQLITE" -cmd ".timeout $SQLITE_BUSY_MS" "$DB" 2>>"$LOG"; then
+    log "ERROR: ingest_preference failed category=$category preference=${preference:0:60}"
+    return 1
+  fi
+  log "upserted preference category=$category preference=${preference:0:60}"
+}
+
+# Sourceable guard: when this file is sourced (not executed), expose only the
+# helper functions above (sqlq, sqlq_int, ingest_preference) and return.
+# Callers that source this file are responsible for their own dependency checks.
+[[ "${BASH_SOURCE[0]}" != "${0}" ]] && return 0
+
 # ---- Dependency checks ----
 if ! command -v jq >/dev/null 2>&1; then
   log "ERROR: jq not found in PATH"
@@ -130,8 +181,9 @@ if [[ -z "$SESSION_ID" ]]; then
   log "ERROR: payload missing session_id"
   exit 2
 fi
-if [[ "$TYPE" != "session_log" && "$TYPE" != "technical_learning" ]]; then
-  log "ERROR: unknown type=$TYPE (must be session_log or technical_learning)"
+if [[ "$TYPE" != "session_log" && "$TYPE" != "technical_learning" && \
+      "$TYPE" != "user_preference" && "$TYPE" != "user_preference_batch" ]]; then
+  log "ERROR: unknown type=$TYPE (must be session_log|technical_learning|user_preference|user_preference_batch)"
   exit 2
 fi
 
@@ -199,6 +251,42 @@ SQL
       exit 3
     fi
     log "inserted technical_learning session=$SESSION_ID title='$TITLE'"
+    ;;
+
+  user_preference)
+    CAT=$(echo "$PAYLOAD" | jq -r '.category // "pending"')
+    PREF=$(echo "$PAYLOAD" | jq -r '.preference // ""')
+    CONF=$(echo "$PAYLOAD" | jq -r '.confidence // ""')
+    SEEN=$(echo "$PAYLOAD" | jq -r '.seen_count // "1"')
+    LAST_REINFORCED=$(echo "$PAYLOAD" | jq -r '.last_reinforced // ""')
+
+    if [[ -z "$PREF" ]]; then
+      log "ERROR: user_preference payload missing preference field"
+      exit 2
+    fi
+
+    if ! ingest_preference "$CAT" "$PREF" "$SESSION_ID" "$HOSTNAME_VAL" "$CONF" "$SEEN" "$LAST_REINFORCED"; then
+      exit 3
+    fi
+    ;;
+
+  user_preference_batch)
+    BATCH_COUNT=$(echo "$PAYLOAD" | jq '.preferences | length // 0')
+    if [[ "$BATCH_COUNT" -eq 0 ]]; then
+      log "user_preference_batch: empty preferences array, nothing to do"
+    else
+      FAILED_PREFS=0
+      for i in $(seq 0 $((BATCH_COUNT - 1))); do
+        ITEM=$(echo "$PAYLOAD" | jq ".preferences[$i]")
+        CAT=$(echo "$ITEM"   | jq -r '.category   // "pending"')
+        PREF=$(echo "$ITEM"  | jq -r '.preference // ""')
+        CONF=$(echo "$ITEM"  | jq -r '.confidence // ""')
+        [[ -z "$PREF" ]] && continue
+        ingest_preference "$CAT" "$PREF" "$SESSION_ID" "$HOSTNAME_VAL" "$CONF" || FAILED_PREFS=$((FAILED_PREFS + 1))
+      done
+      log "user_preference_batch: imported $BATCH_COUNT preferences session=$SESSION_ID failed=$FAILED_PREFS"
+      [[ "$FAILED_PREFS" -gt 0 ]] && exit 3
+    fi
     ;;
 esac
 

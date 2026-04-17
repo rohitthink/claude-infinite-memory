@@ -42,6 +42,11 @@ fi
 CLAUDE_BRIDGE_HOME="${CLAUDE_BRIDGE_HOME:-$HOME/.claude}"
 VAULT="${CLAUDE_BRIDGE_VAULT:-}"
 CLAUDE_BIN="${CLAUDE_BRIDGE_CLAUDE_BIN:-/opt/homebrew/bin/claude}"
+# CLAUDE_BRIDGE_PREFS_BACKEND: controls L2 User Profile write path.
+#   unset or "markdown" (default) — skill writes directly to User Profile.md (existing behaviour).
+#   "sqlite"                      — skill outputs JSON; wrapper ingests via sqlite-backend/ingest.sh.
+PREFS_BACKEND="${CLAUDE_BRIDGE_PREFS_BACKEND:-markdown}"
+INGEST_SH="${CLAUDE_BRIDGE_HOME}/sqlite-backend/ingest.sh"
 
 LOG_DIR="${CLAUDE_BRIDGE_HOME}/logs"
 LOG="$LOG_DIR/obsidian-sync.log"
@@ -248,6 +253,36 @@ Rules for writing to User Profile.md:
 Be conservative. A single vague statement is NOT a preference — look for explicit language OR repetition. When in doubt, don't write. False positives pollute the profile more than a missed signal hurts.
 PROMPT_EOF
 
+# ---- SQLite backend: override User Profile write path ----
+if [[ "$PREFS_BACKEND" == "sqlite" ]]; then
+  cat >>"$PROMPT_FILE" <<SQLITE_PREFS_EOF
+
+SQLITE BACKEND MODE (CLAUDE_BRIDGE_PREFS_BACKEND=sqlite):
+The User Profile.md write path has been replaced by a SQLite backend.
+DO NOT write to User Profile.md in this mode.
+Instead, after performing all other vault writes, output a single JSON block
+at the very END of your response (after all markdown output) in exactly this
+format — nothing before or after the fenced block:
+
+\`\`\`json
+{
+  "preferences": [
+    {"category": "pending", "preference": "one-liner preference text", "confidence": "high|medium|low"}
+  ]
+}
+\`\`\`
+
+Valid categories: technical, communication, antipattern, tooling, pending
+If no preference signals were found, output:
+\`\`\`json
+{"preferences":[]}
+\`\`\`
+
+The JSON block is machine-processed by the SessionEnd wrapper and fed to the
+SQLite ingest pipeline. Do NOT include any explanatory text inside the JSON block.
+SQLITE_PREFS_EOF
+fi
+
 # ---- Wrapper with flock + timeout + mount pre-flight ----
 cat >"$WRAPPER" <<WRAPPER_EOF
 #!/bin/bash
@@ -269,16 +304,21 @@ WRAPPER='$WRAPPER'
 SESSION_ID='$SESSION_ID'
 REASON='$REASON'
 CLAUDE_BIN='$CLAUDE_BIN'
+PREFS_BACKEND='$PREFS_BACKEND'
+INGEST_SH='$INGEST_SH'
+SPOOL_DIR='$SPOOL_DIR'
+TIMESTAMP_TAG='$TIMESTAMP_TAG'
 
 log() { echo "\$(date '+%Y-%m-%d %H:%M:%S') [sync-\$\$] \$*" >> "\$LOG"; }
 
 cleanup() {
   rm -f "\$PROMPT_FILE" "\$REDACTED_TRANSCRIPT" "\$WRAPPER"
+  rm -f "\${SPOOL_DIR}/claude-out-\${SESSION_ID}-\${TIMESTAMP_TAG}.txt"
   rmdir "\$GLOBAL_LOCK" 2>/dev/null
 }
 trap cleanup EXIT INT TERM
 
-log "=== Sync start | session=\$SESSION_ID reason=\$REASON ==="
+log "=== Sync start | session=\$SESSION_ID reason=\$REASON prefs_backend=\$PREFS_BACKEND ==="
 
 # Pre-flight vault mount check after sleep
 if [[ ! -d "\$VAULT" ]]; then
@@ -311,10 +351,45 @@ log "lock acquired"
 PROMPT_CONTENT=\$(cat "\$PROMPT_FILE")
 
 log "invoking claude -p (timeout=300s)"
-/usr/bin/perl -e 'alarm shift @ARGV; exec @ARGV' 300 \\
-  "\$CLAUDE_BIN" -p "\$PROMPT_CONTENT" \\
-    --allowedTools "Read,Write,Edit,Glob,Grep,Bash,Skill" >> "\$LOG" 2>&1
-RC=\$?
+
+if [[ "\$PREFS_BACKEND" == "sqlite" ]]; then
+  # Capture claude -p stdout so we can extract the JSON preference block.
+  # The output is tee'd to the log so nothing is lost.
+  CLAUDE_OUT_FILE="\${SPOOL_DIR}/claude-out-\${SESSION_ID}-\${TIMESTAMP_TAG}.txt"
+  /usr/bin/perl -e 'alarm shift @ARGV; exec @ARGV' 300 \\
+    "\$CLAUDE_BIN" -p "\$PROMPT_CONTENT" \\
+      --allowedTools "Read,Write,Edit,Glob,Grep,Bash,Skill" > "\$CLAUDE_OUT_FILE" 2>&1
+  RC=\$?
+  cat "\$CLAUDE_OUT_FILE" >> "\$LOG"
+
+  # Extract the JSON preference block (the last ```json ... ``` fenced block in output).
+  if command -v jq >/dev/null 2>&1 && [[ -s "\$CLAUDE_OUT_FILE" ]]; then
+    PREFS_JSON_RAW=\$(perl -0777 -ne \
+      'my @m = /\x60\x60\x60json\s*(\{.*?\})\s*\x60\x60\x60/gs; print \$m[-1] if @m' \
+      "\$CLAUDE_OUT_FILE" 2>/dev/null || echo "")
+
+    if [[ -n "\$PREFS_JSON_RAW" ]]; then
+      BATCH_PAYLOAD=\$(jq -n \\
+        --arg sid "\$SESSION_ID" \\
+        --argjson raw "\$PREFS_JSON_RAW" \\
+        '{session_id:\$sid, type:"user_preference_batch", preferences:(\$raw.preferences // [])}' \\
+        2>/dev/null || echo "")
+
+      if [[ -n "\$BATCH_PAYLOAD" && -x "\$INGEST_SH" ]]; then
+        printf '%s\n' "\$BATCH_PAYLOAD" | "\$INGEST_SH" \\
+          && log "SQLite prefs batch import complete session=\$SESSION_ID" \\
+          || log "WARN: SQLite prefs batch import failed session=\$SESSION_ID"
+      fi
+    else
+      log "SQLite prefs: no JSON block found in claude -p output"
+    fi
+  fi
+else
+  /usr/bin/perl -e 'alarm shift @ARGV; exec @ARGV' 300 \\
+    "\$CLAUDE_BIN" -p "\$PROMPT_CONTENT" \\
+      --allowedTools "Read,Write,Edit,Glob,Grep,Bash,Skill" >> "\$LOG" 2>&1
+  RC=\$?
+fi
 
 log "claude -p exit=\$RC"
 log "=== Sync end ==="

@@ -195,6 +195,72 @@ prompt telling the model to treat the inline corpus as untrusted data,
 not instructions. The MOC daemon invokes no LLM and therefore has no
 allow-list to narrow.
 
+## Tier 3: SQLite WAL canonical storage (L2 User Profile)
+
+Three independent audits (Gemini, Grok, Perplexity) converged on the same
+meta-recommendation: machine-generated writes should use SQLite WAL as the
+**canonical store** and markdown as a **derived view**.
+
+L2 User Profile is the first (and highest-priority) consumer because it is the
+highest-frequency write path and the most conflict-prone: multiple concurrent
+sessions can fire `SessionEnd` at the same time, each trying to append to the
+same `User Profile.md`.
+
+### Design
+
+```
+SessionEnd hook
+  │
+  ├─ (CLAUDE_BRIDGE_PREFS_BACKEND=markdown, default)
+  │     claude -p writes directly to User Profile.md
+  │     [existing behaviour, unaffected]
+  │
+  └─ (CLAUDE_BRIDGE_PREFS_BACKEND=sqlite)
+        claude -p outputs JSON preference block
+              │
+              ▼
+        session-end wrapper
+              │  extract ```json ... ``` block
+              ▼
+        ingest.sh  type=user_preference_batch
+              │
+              ▼
+        SQLite WAL  user_preferences table
+              │
+              ▼  (hourly launchd / on-demand)
+        export-to-vault.sh --section user-profile
+              │
+              ▼
+        User Profile.md   (derived view; always fully regenerated)
+```
+
+### Key properties
+
+- **Concurrency-safe**: WAL mode + UNIQUE index. Concurrent writers queue
+  atomically; the `ON CONFLICT DO UPDATE` upsert prevents duplicate rows.
+- **Idempotent migration**: `migrate-from-markdown.sh` reads the existing
+  markdown, ingests each bullet once, and renames the original to
+  `.pre-sqlite-backup`. Reruns are safe (UNIQUE index dedups; seen_count++).
+- **Markdown is derived, not authoritative**: `export-to-vault.sh --section
+  user-profile` regenerates the entire file from the DB, deterministically
+  ordered by `first_seen DESC` within each category. The file can be deleted
+  and regenerated at any time with no data loss.
+- **Feature flag default off**: `CLAUDE_BRIDGE_PREFS_BACKEND` defaults to
+  `markdown`. Existing sessions are unaffected until the user opts in.
+- **Schema idempotency**: `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT
+  EXISTS` mean running `schema.sql` on an existing DB is always a no-op.
+
+### Files
+
+| File | Role |
+|------|------|
+| `sqlite-backend/schema.sql` | `user_preferences` table + UNIQUE index |
+| `sqlite-backend/ingest.sh` | `user_preference` + `user_preference_batch` type dispatch; `ingest_preference()` function (sourceable) |
+| `sqlite-backend/export-to-vault.sh` | `--section user-profile` renders full markdown view |
+| `sqlite-backend/migrate-from-markdown.sh` | One-time markdown → SQLite migration |
+| `sqlite-backend/com.example.sqlite-export.plist.template` | Hourly launchd export job template |
+| `hooks/session-end-vault-sync.sh` | Feature-flag detection; modified prompt + wrapper for `sqlite` mode |
+
 ## Component inventory
 
 | Component | Path | Triggered by |

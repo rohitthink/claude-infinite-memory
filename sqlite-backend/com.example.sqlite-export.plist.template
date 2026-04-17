@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd plist template: hourly User Profile export (SQLite → markdown).
+
+  INSTALLATION (one-time setup):
+    1. Replace every REPLACE_WITH_* placeholder with real paths.
+    2. Copy to ~/Library/LaunchAgents/:
+         cp com.example.sqlite-export.plist.template \
+            ~/Library/LaunchAgents/com.example.sqlite-export.plist
+    3. Load the agent:
+         launchctl load ~/Library/LaunchAgents/com.example.sqlite-export.plist
+    4. Verify it loaded:
+         launchctl list | grep sqlite-export
+
+  UNINSTALL:
+    launchctl unload ~/Library/LaunchAgents/com.example.sqlite-export.plist
+    rm ~/Library/LaunchAgents/com.example.sqlite-export.plist
+
+  NOTES:
+  - StartInterval 3600 = run every hour. Adjust as needed.
+  - The export is a no-op when user_preferences is empty or unchanged, so
+    frequent runs are cheap.
+  - RunAtLoad false: first run occurs at the next interval tick. Set to
+    <true/> if you want an immediate render on agent load.
+  - StandardOutPath / StandardErrorPath both write to the same log file.
+    Rotate it with a companion logrotate / newsyslog rule if the vault is busy.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.sqlite-export.user-profile</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>REPLACE_WITH_CLAUDE_BRIDGE_HOME/sqlite-backend/export-to-vault.sh</string>
+        <string>--section</string>
+        <string>user-profile</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Path to your ~/.claude (or wherever CLAUDE_BRIDGE_HOME lives). -->
+        <key>CLAUDE_BRIDGE_HOME</key>
+        <string>REPLACE_WITH_CLAUDE_BRIDGE_HOME</string>
+
+        <!-- Absolute path to your Obsidian vault root. -->
+        <key>CLAUDE_BRIDGE_VAULT</key>
+        <string>REPLACE_WITH_VAULT_PATH</string>
+    </dict>
+
+    <!-- Run every 3600 seconds (1 hour). -->
+    <key>StartInterval</key>
+    <integer>3600</integer>
+
+    <!-- Do not fire immediately on launchctl load. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Keep the agent alive across reboots. -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>REPLACE_WITH_CLAUDE_BRIDGE_HOME/logs/sqlite-export-launchd.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>REPLACE_WITH_CLAUDE_BRIDGE_HOME/logs/sqlite-export-launchd.log</string>
+</dict>
+</plist>
