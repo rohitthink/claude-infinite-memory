@@ -72,6 +72,21 @@ https://privacy.anthropic.com/. Full details in [docs/gdpr.md](gdpr.md).
 1. Run `scripts/macos-exclusions-setup.sh` if you haven't already — it places a `.metadata_never_index` flag in `$CLAUDE_BRIDGE_HOME` so Spotlight skips the transcript tree.
 2. Install the mds-watchdog LaunchAgent (see `daemons/mds-watchdog/`) to get notified when mds stays elevated for more than 5 minutes.
 3. If the vault itself is the source of slowness (large vault, recent bulk import), see **"When mds gets stuck"** in [docs/macos-specific.md](macos-specific.md#when-mds-gets-stuck) for diagnosis steps and the manual recovery sequence (`sudo mdutil -E "$CLAUDE_BRIDGE_VAULT"`).
+### How do I tune the MCP chunk cap for my vault?
+
+The MCP server uses file-type-aware per-file chunk caps when returning
+`search_vault` results. Four env vars control the caps:
+
+| Env var | Default | Applies to |
+|---|---|---|
+| `CLAUDE_BRIDGE_MAX_CHUNKS_DEFAULT` | 2 | All files not matched below |
+| `CLAUDE_BRIDGE_MAX_CHUNKS_HISTORICAL` | 8 | `07 - Claude Knowledge/Historical Summaries/*` |
+| `CLAUDE_BRIDGE_MAX_CHUNKS_MOC` | 6 | `07 - Claude Knowledge/MOCs/*` |
+| `CLAUDE_BRIDGE_MAX_CHUNKS_PROPOSAL` | 5 | Any file ending in `.proposed.md` |
+
+Set them in your shell environment or in the wrapper that launches the
+MCP server. The default of 2 for scattered files is an embedding-poisoning
+defense; do not raise it globally without understanding the risk.
 
 ### 1. Is my vault content sent to Anthropic?
 
