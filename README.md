@@ -119,7 +119,7 @@ model, not a theoretical one.
 - **Query-only MCP.** `PRAGMA query_only=ON`. The server can't write
   to its own index.
 
-Full details in [docs/threat-model.md](docs/threat-model.md).
+Full details in [docs/threat-model.md](docs/threat-model.md). For the data-protection view — what's stored, how to export, how to delete — see [docs/gdpr.md](docs/gdpr.md).
 
 ## Quickstart
 

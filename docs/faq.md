@@ -1,5 +1,69 @@
 # FAQ
 
+### How do I export all my data?
+
+Run the export script that ships with this repo:
+
+```bash
+# Preview what would be archived (no files created):
+scripts/gdpr-export.sh --dry-run
+
+# Create a tar.gz archive on your Desktop:
+scripts/gdpr-export.sh
+
+# Custom output path:
+scripts/gdpr-export.sh --output ~/Documents/my-export.tar.gz
+```
+
+The archive includes a `MANIFEST.md` at its root describing every file
+and its origin. By default it covers system-generated content only
+(transcripts, logs, sync-state, SQLite DB, Claude vault knowledge files).
+Pass `--include-full-vault` to also include your own Obsidian notes.
+
+Full details in [docs/gdpr.md §Portability](gdpr.md#8-portability-export).
+
+### How do I delete everything this system stored?
+
+Run the delete script:
+
+```bash
+# Preview what would be deleted — NO changes made:
+scripts/gdpr-delete.sh --tier=system-state --dry-run
+
+# Delete transcripts, logs, sync-state, SQLite DB (leaves vault intact):
+scripts/gdpr-delete.sh --tier=system-state --confirm
+
+# Also remove Claude's knowledge files from the vault:
+scripts/gdpr-delete.sh --tier=claude-vault-content --confirm
+
+# Full erasure — remove the entire $CLAUDE_BRIDGE_HOME:
+scripts/gdpr-delete.sh --tier=all --confirm
+```
+
+`--dry-run` is the default. Nothing is deleted without `--confirm` and
+a typed `DELETE` confirmation prompt.
+
+Full details in [docs/gdpr.md §Erasure](gdpr.md#7-erasure).
+
+### Does this share data with Anthropic?
+
+Yes, in a specific and bounded way: every `claude -p` call — triggered
+at SessionEnd and by the L4 compaction daemon — sends the **redacted
+transcript** (17-category secret regex applied first) plus a prompt to
+Anthropic's API. The vault itself is never uploaded wholesale.
+
+The L1 SessionStart context slice (relevant vault files for your `cwd`)
+is also sent as session context on each `claude` invocation.
+
+No telemetry, crash reporting, or analytics are sent anywhere by this
+system. The only outbound calls are:
+- Anthropic API (your key, your bill)
+- `rsync` to your TrueNAS host (if configured, on your schedule)
+- `ollama` → localhost (never leaves your machine)
+
+To request deletion of your Anthropic API history, visit
+https://privacy.anthropic.com/. Full details in [docs/gdpr.md](gdpr.md).
+
 ### 1. Is my vault content sent to Anthropic?
 
 Only when the SessionEnd hook's `claude -p` child runs  that child sends

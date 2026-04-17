@@ -209,6 +209,10 @@ catch. The actual risk is low because the query never reaches a shell.
 
 ## What's NOT defended
 
+> **Data-protection angle:** this document covers attack defenses. For
+> an inventory of what personal data this system generates, where it
+> lives, and your export/erasure rights, see [docs/gdpr.md](gdpr.md).
+
 - **Physical access to your Mac.** Anyone at your keyboard can read the
   vault directly. Use FileVault.
 - **Compromise of your Claude API key.** If the key leaks, an attacker
