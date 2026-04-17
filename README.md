@@ -228,6 +228,8 @@ Production-tested on a single user's daily driver (macOS + Obsidian
 Sync). Not battle-tested in multi-user deployments or exotic
 environments  PRs and issue reports welcome.
 
+See [CHANGELOG.md](CHANGELOG.md) for release history.
+
 ## Acknowledgments
 
 This architecture emerged from a deliberate adversarial review process:
