@@ -182,6 +182,29 @@ It does **not** touch:
 - `~/.claude/settings.json` — remove the `hooks` and `mcpServers.obsidian-brain` entries manually
 - `~/.claude-bridge-backups/` — remove when you are satisfied
 
+### 18. How do I see what compaction has proposed but not applied?
+
+Use the `compaction-report.sh` tool — it gives a unified view of proposal state,
+applied history, orphaned proposals, and MOC cache freshness:
+
+```bash
+sqlite-backend/compaction-report.sh
+```
+
+The report shows:
+- **Staged proposals** — pending `--apply`, with quarter, kind, entry count, and
+  file path. If you see entries here, review the `.proposed.md` files and run
+  `compaction-daemon.sh --apply` when satisfied.
+- **Recently applied** — last 12 months of applied proposals, with `applied_by`
+  hostname for multi-device auditing.
+- **Orphaned** — proposals that were staged but whose `.proposed.md` file went
+  missing (usually a crash mid-write). Re-run `compaction-daemon.sh` to regenerate.
+- **MOC cache stats** — total cached files and tags, oldest scan timestamp.
+
+Requires `CLAUDE_BRIDGE_COMPACTION_CACHE=sqlite`. If you haven't enabled SQLite mode
+yet, the older `compaction-daemon.sh --list-pending` command lists pending proposals
+from disk (file-glob mode).
+
 ### 17. How do I upgrade?
 
 Pull the latest code and re-run the installer. It will detect the existing

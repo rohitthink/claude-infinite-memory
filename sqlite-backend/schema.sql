@@ -84,3 +84,33 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_pref_unique
 -- Hot-path for export renderer: category + recency sort.
 CREATE INDEX IF NOT EXISTS idx_pref_category_recent
     ON user_preferences(category, last_reinforced DESC);
+
+-- L4 compaction: track every proposal from inception to apply/discard.
+CREATE TABLE IF NOT EXISTS compaction_proposals (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  quarter         TEXT NOT NULL,
+  kind            TEXT NOT NULL CHECK(kind IN ('session_log','technical_learnings')),
+  source_entries  INTEGER NOT NULL,
+  source_start    TEXT NOT NULL,
+  source_end      TEXT NOT NULL,
+  proposal_path   TEXT NOT NULL,
+  proposal_sha256 TEXT NOT NULL,
+  status          TEXT NOT NULL CHECK(status IN ('staged','applied','discarded','orphaned')) DEFAULT 'staged',
+  created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  applied_at      TEXT,
+  applied_by      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_compaction_pending ON compaction_proposals(status, quarter);
+
+-- L4 MOC cache: incremental tag-to-files map. Rebuilt only for files whose
+-- mtime > last_scanned_at.
+CREATE TABLE IF NOT EXISTS moc_file_tags (
+  file_path       TEXT NOT NULL,
+  tag             TEXT NOT NULL,
+  excerpt         TEXT,
+  last_scanned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  file_mtime      INTEGER NOT NULL,
+  PRIMARY KEY (file_path, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_moc_tag ON moc_file_tags(tag);
+CREATE INDEX IF NOT EXISTS idx_moc_stale ON moc_file_tags(last_scanned_at);

@@ -89,6 +89,12 @@ GLOBAL_LOCK="$LOCK_DIR/vault-sync.lock"
 
 PERL_BIN="/usr/bin/perl"
 
+# Feature flag: 'sqlite' tracks proposals in DB; 'file' (default) uses disk-glob behaviour.
+CLAUDE_BRIDGE_COMPACTION_CACHE="${CLAUDE_BRIDGE_COMPACTION_CACHE:-file}"
+SQLITE_DB="${CLAUDE_BRIDGE_HOME}/claude-bridge.db"
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCHEMA_SQL="$_SCRIPT_DIR/../../sqlite-backend/schema.sql"
+
 AGE_THRESHOLD_DAYS=90
 MIN_QUALIFYING_ENTRIES=3
 CLAUDE_TIMEOUT_SEC=300
@@ -113,6 +119,7 @@ VAULT="${VAULT_OVERRIDE:-$DEFAULT_VAULT}"
 APPLY=0
 YES_SCRIPTED=0
 LIST_PENDING=0
+DISCARD_QUARTER=""
 
 usage() {
   cat <<'EOF'
@@ -133,6 +140,10 @@ Flags:
                            --yes for scripted pipelines.
   --yes                    Skip interactive-stdin check on --apply.
   --list-pending           List pending *.proposed.md files and exit.
+                           With CLAUDE_BRIDGE_COMPACTION_CACHE=sqlite: queries DB.
+  --discard YYYY-Qn        Discard a staged proposal: mark discarded in DB and
+                           remove the .proposed.md file. (sqlite mode only for DB
+                           update; file is removed regardless.)
   --help                   Show this help and exit.
 
 Behavior:
@@ -187,6 +198,18 @@ while [[ $# -gt 0 ]]; do
       LIST_PENDING=1
       shift
       ;;
+    --discard)
+      DISCARD_QUARTER="${2:-}"
+      if [[ -z "$DISCARD_QUARTER" ]]; then
+        echo "ERROR: --discard requires YYYY-Qn argument" >&2
+        exit 2
+      fi
+      if ! [[ "$DISCARD_QUARTER" =~ ^[0-9]{4}-Q[1-4]$ ]]; then
+        echo "ERROR: --discard must match YYYY-Qn (e.g. 2025-Q4)" >&2
+        exit 2
+      fi
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -238,32 +261,134 @@ if [[ ! -f "$SESSION_LOG" ]]; then
   exit 1
 fi
 
+# ---- SQLite helpers (only used when CLAUDE_BRIDGE_COMPACTION_CACHE=sqlite) ----
+
+# Compute SHA-256 of a file. Returns hex string.
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | cut -d' ' -f1
+  else
+    echo "unknown"
+  fi
+}
+
+# Escape a string for SQL single-quote context (double any single quotes).
+_sql_esc() { printf '%s' "$1" | sed "s/'/''/g"; }
+
+# Ensure the DB exists and has the L4 tables (idempotent).
+ensure_compaction_db() {
+  if [[ ! -f "$SCHEMA_SQL" ]]; then
+    log "WARN: schema.sql not found at $SCHEMA_SQL; skipping DB init"
+    return 1
+  fi
+  sqlite3 "$SQLITE_DB" < "$SCHEMA_SQL" 2>>"$LOG" || {
+    log "ERROR: failed to init SQLite schema at $SQLITE_DB"; return 1
+  }
+  return 0
+}
+
+# Run a SQL statement against the compaction DB. Logs errors but doesn't abort.
+db_exec() {
+  sqlite3 "$SQLITE_DB" "$1" 2>>"$LOG" || log "WARN: db_exec failed: $1"
+}
+
+# Run a SQL query and return the result.
+db_query() {
+  sqlite3 "$SQLITE_DB" "$1" 2>>"$LOG"
+}
+
+# On startup (sqlite mode): scan staged rows whose proposal_path no longer exists
+# on disk and mark them orphaned. Heals state left by a crash mid-write.
+db_orphan_sweep() {
+  [[ "$CLAUDE_BRIDGE_COMPACTION_CACHE" != "sqlite" ]] && return 0
+  ensure_compaction_db || return 0
+  local swept=0
+  while IFS='|' read -r row_id rel_path; do
+    [[ -z "$row_id" ]] && continue
+    local abs_path="$VAULT/$rel_path"
+    if [[ ! -f "$abs_path" ]]; then
+      db_exec "UPDATE compaction_proposals SET status='orphaned' WHERE id=$row_id;"
+      log "orphan-sweep: marked id=$row_id path=$rel_path as orphaned (file missing)"
+      swept=$((swept + 1))
+    fi
+  done < <(db_query "SELECT id, proposal_path FROM compaction_proposals WHERE status='staged';" 2>/dev/null)
+  [[ "$swept" -gt 0 ]] && log "orphan-sweep: $swept rows marked orphaned"
+  return 0
+}
+
+# Run orphan sweep whenever we start up in sqlite mode.
+db_orphan_sweep
+
 # ========================================================================
 # ---- --list-pending: list proposed files and exit ----
 # ========================================================================
 if [[ "$LIST_PENDING" -eq 1 ]]; then
-  found=0
-  echo "Pending proposed compaction files in $KNOWLEDGE_DIR:"
-  echo
-  printf '  %-10s  %-25s  %s\n' "SIZE" "MODIFIED" "PATH"
-  printf '  %-10s  %-25s  %s\n' "----------" "-------------------------" "----"
-  if [[ -d "$HISTORICAL_DIR" ]]; then
-    while IFS= read -r -d '' pf; do
+  if [[ "$CLAUDE_BRIDGE_COMPACTION_CACHE" == "sqlite" ]]; then
+    ensure_compaction_db || true
+    echo "Pending compaction proposals (SQLite):"
+    echo
+    printf '  %-12s  %-22s  %-8s  %s\n' "QUARTER" "KIND" "ENTRIES" "PATH"
+    printf '  %-12s  %-22s  %-8s  %s\n' "------------" "----------------------" "--------" "----"
+    found=0
+    while IFS='|' read -r quarter kind entries path created_at; do
+      [[ -z "$quarter" ]] && continue
       found=1
-      sz=$(wc -c < "$pf" | tr -d ' ')
-      mt=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$pf" 2>/dev/null || stat -c '%y' "$pf" 2>/dev/null | cut -d'.' -f1)
-      printf '  %-10s  %-25s  %s\n' "${sz}B" "$mt" "$pf"
-    done < <(find "$HISTORICAL_DIR" -maxdepth 1 -type f -name '*.proposed.md' -print0 2>/dev/null)
+      printf '  %-12s  %-22s  %-8s  %s  (staged %s)\n' \
+        "$quarter" "$kind" "$entries" "$path" "$created_at"
+    done < <(db_query \
+      "SELECT quarter,kind,source_entries,proposal_path,created_at FROM compaction_proposals WHERE status='staged' ORDER BY quarter;" \
+      2>/dev/null)
+    [[ "$found" -eq 0 ]] && echo "  (none)"
+  else
+    found=0
+    echo "Pending proposed compaction files in $KNOWLEDGE_DIR:"
+    echo
+    printf '  %-10s  %-25s  %s\n' "SIZE" "MODIFIED" "PATH"
+    printf '  %-10s  %-25s  %s\n' "----------" "-------------------------" "----"
+    if [[ -d "$HISTORICAL_DIR" ]]; then
+      while IFS= read -r -d '' pf; do
+        found=1
+        sz=$(wc -c < "$pf" | tr -d ' ')
+        mt=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$pf" 2>/dev/null || stat -c '%y' "$pf" 2>/dev/null | cut -d'.' -f1)
+        printf '  %-10s  %-25s  %s\n' "${sz}B" "$mt" "$pf"
+      done < <(find "$HISTORICAL_DIR" -maxdepth 1 -type f -name '*.proposed.md' -print0 2>/dev/null)
+    fi
+    if [[ -f "$TECH_PROPOSED" ]]; then
+      found=1
+      sz=$(wc -c < "$TECH_PROPOSED" | tr -d ' ')
+      mt=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$TECH_PROPOSED" 2>/dev/null || stat -c '%y' "$TECH_PROPOSED" 2>/dev/null | cut -d'.' -f1)
+      printf '  %-10s  %-25s  %s\n' "${sz}B" "$mt" "$TECH_PROPOSED"
+    fi
+    [[ "$found" -eq 0 ]] && echo "  (none)"
   fi
-  if [[ -f "$TECH_PROPOSED" ]]; then
-    found=1
-    sz=$(wc -c < "$TECH_PROPOSED" | tr -d ' ')
-    mt=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$TECH_PROPOSED" 2>/dev/null || stat -c '%y' "$TECH_PROPOSED" 2>/dev/null | cut -d'.' -f1)
-    printf '  %-10s  %-25s  %s\n' "${sz}B" "$mt" "$TECH_PROPOSED"
+  exit 0
+fi
+
+# ---- --discard: mark a staged proposal as discarded + remove the file ----
+if [[ -n "$DISCARD_QUARTER" ]]; then
+  log "=== discard mode | quarter=$DISCARD_QUARTER ==="
+
+  # Remove the .proposed.md file from the vault if it exists.
+  discard_file="$HISTORICAL_DIR/${DISCARD_QUARTER}.proposed.md"
+  if [[ -f "$discard_file" ]]; then
+    rm -f "$discard_file"
+    echo "Removed proposal file: $discard_file"
+    log "discard: removed $discard_file"
+  else
+    echo "Note: proposal file not found (already removed?): $discard_file"
+    log "discard: file not found: $discard_file"
   fi
-  if [[ "$found" -eq 0 ]]; then
-    echo "  (none)"
+
+  if [[ "$CLAUDE_BRIDGE_COMPACTION_CACHE" == "sqlite" ]]; then
+    ensure_compaction_db || true
+    q_esc=$(_sql_esc "$DISCARD_QUARTER")
+    updated=$(db_query "UPDATE compaction_proposals SET status='discarded' WHERE status='staged' AND quarter='$q_esc'; SELECT changes();")
+    log "discard: marked $updated DB row(s) discarded for quarter=$DISCARD_QUARTER"
+    echo "Marked $updated staged proposal(s) as discarded in DB."
   fi
+  log "=== discard done | quarter=$DISCARD_QUARTER ==="
   exit 0
 fi
 
@@ -419,6 +544,29 @@ if [[ "$APPLY" -eq 1 ]]; then
         exit 1
       fi
 
+      # sha256 tamper-check (sqlite mode only)
+      if [[ "$CLAUDE_BRIDGE_COMPACTION_CACHE" == "sqlite" ]]; then
+        ensure_compaction_db || true
+        rel_prop="${prop#$VAULT/}"
+        q_esc=$(_sql_esc "$qname")
+        stored_sha=$(db_query "SELECT proposal_sha256 FROM compaction_proposals WHERE status='staged' AND quarter='$q_esc' AND kind='session_log' AND proposal_path='$(_sql_esc "$rel_prop")' ORDER BY id DESC LIMIT 1;")
+        if [[ -n "$stored_sha" ]] && [[ "$stored_sha" != "unknown" ]]; then
+          current_sha=$(sha256_file "$prop")
+          if [[ "$current_sha" != "$stored_sha" ]]; then
+            echo "ERROR: proposal $prop has been modified since staging." >&2
+            echo "       stored sha256:  $stored_sha" >&2
+            echo "       current sha256: $current_sha" >&2
+            echo "       Re-run compaction to regenerate, or pass --force-apply-modified to skip this check." >&2
+            if [[ "${FORCE_APPLY_MODIFIED:-0}" != "1" ]]; then
+              exit 1
+            fi
+            log "WARN: --force-apply-modified set; proceeding despite sha256 mismatch for $prop"
+          else
+            log "--apply: sha256 verified OK for $prop"
+          fi
+        fi
+      fi
+
       echo "applying session-log proposal: $prop -> $HISTORICAL_DIR/${qname}.md"
       log "--apply: committing session proposal $prop for quarter $qname"
 
@@ -538,6 +686,15 @@ EOF
 
       rm -f "$prop"
       log "removed applied proposal: $prop"
+
+      # Mark applied in DB (sqlite mode)
+      if [[ "$CLAUDE_BRIDGE_COMPACTION_CACHE" == "sqlite" ]]; then
+        rel_prop="${prop#$VAULT/}"
+        q_esc=$(_sql_esc "$qname")
+        db_exec "UPDATE compaction_proposals SET status='applied', applied_at=CURRENT_TIMESTAMP, applied_by='$(_sql_esc "$(hostname)")' WHERE status='staged' AND quarter='$q_esc' AND kind='session_log' AND proposal_path='$(_sql_esc "$rel_prop")';"
+        log "--apply: marked session_log proposal applied in DB for quarter=$qname"
+      fi
+
       applied_any=1
     done < <(find "$HISTORICAL_DIR" -maxdepth 1 -type f -name '*.proposed.md' -print0 2>/dev/null)
   fi
@@ -555,6 +712,28 @@ EOF
       echo "       Technical Learnings.md may have been modified since the proposal was generated." >&2
       echo "       Regenerate the proposal (run without --apply) before applying." >&2
       exit 1
+    fi
+
+    # sha256 tamper-check for tech learnings (sqlite mode only)
+    if [[ "$CLAUDE_BRIDGE_COMPACTION_CACHE" == "sqlite" ]]; then
+      ensure_compaction_db || true
+      rel_tech="${TECH_PROPOSED#$VAULT/}"
+      stored_sha_tl=$(db_query "SELECT proposal_sha256 FROM compaction_proposals WHERE status='staged' AND kind='technical_learnings' AND proposal_path='$(_sql_esc "$rel_tech")' ORDER BY id DESC LIMIT 1;")
+      if [[ -n "$stored_sha_tl" ]] && [[ "$stored_sha_tl" != "unknown" ]]; then
+        current_sha_tl=$(sha256_file "$TECH_PROPOSED")
+        if [[ "$current_sha_tl" != "$stored_sha_tl" ]]; then
+          echo "ERROR: proposal $TECH_PROPOSED has been modified since staging." >&2
+          echo "       stored sha256:  $stored_sha_tl" >&2
+          echo "       current sha256: $current_sha_tl" >&2
+          echo "       Re-run compaction to regenerate, or pass --force-apply-modified to skip." >&2
+          if [[ "${FORCE_APPLY_MODIFIED:-0}" != "1" ]]; then
+            exit 1
+          fi
+          log "WARN: --force-apply-modified set; proceeding despite sha256 mismatch for tech learnings"
+        else
+          log "--apply: sha256 verified OK for tech-learnings proposal"
+        fi
+      fi
     fi
 
     echo "applying tech-learnings proposal: $TECH_PROPOSED -> $TECH_LEARNINGS"
@@ -613,6 +792,14 @@ EOF
 
     rm -f "$TECH_PROPOSED"
     log "removed applied proposal: $TECH_PROPOSED"
+
+    # Mark applied in DB (sqlite mode)
+    if [[ "$CLAUDE_BRIDGE_COMPACTION_CACHE" == "sqlite" ]]; then
+      rel_tech="${TECH_PROPOSED#$VAULT/}"
+      db_exec "UPDATE compaction_proposals SET status='applied', applied_at=CURRENT_TIMESTAMP, applied_by='$(_sql_esc "$(hostname)")' WHERE status='staged' AND kind='technical_learnings' AND proposal_path='$(_sql_esc "$rel_tech")';"
+      log "--apply: marked technical_learnings proposal applied in DB"
+    fi
+
     applied_any=1
   fi
 
@@ -775,6 +962,22 @@ if [[ "$TARGET_COUNT" -ge "$MIN_QUALIFYING_ENTRIES" ]] || \
 
     PROPOSED_FILE="$HISTORICAL_DIR/${SESSION_TARGET_QUARTER}.proposed.md"
 
+    # Stage the proposal in DB before invoking claude -p (sqlite mode).
+    # Allows crash-recovery: if the process dies before writing the file,
+    # the next startup will mark this row orphaned via db_orphan_sweep().
+    _SESSION_PROPOSAL_DB_ID=""
+    if [[ "$CLAUDE_BRIDGE_COMPACTION_CACHE" == "sqlite" ]]; then
+      ensure_compaction_db || true
+      rel_prop="${PROPOSED_FILE#$VAULT/}"
+      _SESSION_PROPOSAL_DB_ID=$(sqlite3 "$SQLITE_DB" <<_SQLEOF 2>>"$LOG"
+INSERT INTO compaction_proposals (quarter,kind,source_entries,source_start,source_end,proposal_path,proposal_sha256)
+VALUES ('$(_sql_esc "$SESSION_TARGET_QUARTER")','session_log',$TARGET_COUNT,'$(_sql_esc "$MIN_DATE")','$(_sql_esc "$MAX_DATE")','$(_sql_esc "$rel_prop")','_pending');
+SELECT last_insert_rowid();
+_SQLEOF
+)
+      log "staged session_log proposal in DB id=${_SESSION_PROPOSAL_DB_ID} quarter=$SESSION_TARGET_QUARTER"
+    fi
+
     PROMPT_FILE="$WORK_DIR/session-prompt.txt"
     {
       printf '%s' "$DEFENSIVE_PROMPT"
@@ -852,6 +1055,14 @@ PROMPT_EOF
     else
       cp "$SUMMARY_OUT" "$PROPOSED_FILE"
       log "wrote proposal to $PROPOSED_FILE"
+
+      # Update staged row with computed sha256 (sqlite mode).
+      if [[ "$CLAUDE_BRIDGE_COMPACTION_CACHE" == "sqlite" ]] && [[ -n "$_SESSION_PROPOSAL_DB_ID" ]]; then
+        _sha=$(sha256_file "$PROPOSED_FILE")
+        db_exec "UPDATE compaction_proposals SET proposal_sha256='$(_sql_esc "$_sha")' WHERE id=$_SESSION_PROPOSAL_DB_ID;"
+        log "updated session_log proposal sha256=$_sha id=$_SESSION_PROPOSAL_DB_ID"
+      fi
+
       echo "PROPOSAL: $PROPOSED_FILE"
       echo "  ($TARGET_COUNT entries from quarter $SESSION_TARGET_QUARTER, $MIN_DATE -> $MAX_DATE)"
       echo "  Review the file above, then run:"
@@ -991,6 +1202,21 @@ PROMPT_EOF
     TECH_PROMPT_CONTENT=$(cat "$TECH_PROMPT_FILE")
     TECH_SUMMARY_OUT="$WORK_DIR/tech-summary.md"
 
+    # Stage tech-learnings proposal in DB before invoking claude -p (sqlite mode).
+    _TECH_PROPOSAL_DB_ID=""
+    if [[ "$CLAUDE_BRIDGE_COMPACTION_CACHE" == "sqlite" ]]; then
+      ensure_compaction_db || true
+      rel_tech_prop="${TECH_PROPOSED#$VAULT/}"
+      _tech_quarter="${SESSION_TARGET_QUARTER:-$(quarter_for_date "$TODAY")}"
+      _TECH_PROPOSAL_DB_ID=$(sqlite3 "$SQLITE_DB" <<_SQLEOF 2>>"$LOG"
+INSERT INTO compaction_proposals (quarter,kind,source_entries,source_start,source_end,proposal_path,proposal_sha256)
+VALUES ('$(_sql_esc "$_tech_quarter")','technical_learnings',$TECH_ENTRY_COUNT,'$(_sql_esc "$TODAY")','$(_sql_esc "$TODAY")','$(_sql_esc "$rel_tech_prop")','_pending');
+SELECT last_insert_rowid();
+_SQLEOF
+)
+      log "staged technical_learnings proposal in DB id=${_TECH_PROPOSAL_DB_ID} quarter=$_tech_quarter"
+    fi
+
     log "invoking claude -p for Technical Learnings dedupe (timeout=${CLAUDE_TIMEOUT_SEC}s, allowedTools=$CLAUDE_ALLOWED_TOOLS)"
     (
       unset CLAUDECODE
@@ -1009,6 +1235,14 @@ PROMPT_EOF
     else
       cp "$TECH_SUMMARY_OUT" "$TECH_PROPOSED"
       log "wrote proposal to $TECH_PROPOSED"
+
+      # Update staged row with computed sha256 (sqlite mode).
+      if [[ "$CLAUDE_BRIDGE_COMPACTION_CACHE" == "sqlite" ]] && [[ -n "$_TECH_PROPOSAL_DB_ID" ]]; then
+        _tech_sha=$(sha256_file "$TECH_PROPOSED")
+        db_exec "UPDATE compaction_proposals SET proposal_sha256='$(_sql_esc "$_tech_sha")' WHERE id=$_TECH_PROPOSAL_DB_ID;"
+        log "updated technical_learnings proposal sha256=$_tech_sha id=$_TECH_PROPOSAL_DB_ID"
+      fi
+
       echo "PROPOSAL: $TECH_PROPOSED"
       echo "  (deduped view of $TECH_ENTRY_COUNT Technical Learnings entries)"
       echo "  Review the file above, then run:"

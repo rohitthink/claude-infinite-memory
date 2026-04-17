@@ -50,16 +50,24 @@ LOG="$LOG_DIR/compaction.log"   # shared with compaction-daemon for unified view
 LOCK_DIR="${CLAUDE_BRIDGE_HOME}/sync-active"
 GLOBAL_LOCK="$LOCK_DIR/vault-sync.lock"
 
-MIN_REFERENCES=5
+MIN_REFERENCES="${MOC_MIN_FILES:-5}"
 LOCK_WAIT_SEC=300
 
 # Stopwords don't MOC these (too generic or managed elsewhere)
 STOPWORDS_RE='^(claude|sessions?|log|index|tools?|automation|patterns?|debugging)$'
 
+# Feature flag: 'sqlite' uses incremental tag cache; 'scan' (default) does
+# a full vault scan on every run. Set CLAUDE_BRIDGE_MOC_CACHE=sqlite to opt in.
+CLAUDE_BRIDGE_MOC_CACHE="${CLAUDE_BRIDGE_MOC_CACHE:-scan}"
+SQLITE_DB="${CLAUDE_BRIDGE_HOME}/claude-bridge.db"
+_MOC_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MOC_SCHEMA_SQL="$_MOC_SCRIPT_DIR/../../sqlite-backend/schema.sql"
+
 # ---- Arg parsing ----
 DRY_RUN="${DRYRUN:-0}"
 TOPIC_FILTER=""
 VAULT="${VAULT_OVERRIDE:-$DEFAULT_VAULT}"
+MOC_INVALIDATE=0
 
 usage() {
   cat <<'EOF'
@@ -74,6 +82,8 @@ Flags:
                            references in the vault).
   --vault-override <path>  Override vault root (for testing).
                            Also VAULT_OVERRIDE env var.
+  --invalidate             Truncate the moc_file_tags cache and do a full
+                           rebuild (escape hatch for CLAUDE_BRIDGE_MOC_CACHE=sqlite).
   --help                   Show this help.
 
 Behavior:
@@ -109,6 +119,10 @@ while [[ $# -gt 0 ]]; do
         exit 2
       fi
       shift 2
+      ;;
+    --invalidate)
+      MOC_INVALIDATE=1
+      shift
       ;;
     --help|-h)
       usage
@@ -155,9 +169,32 @@ if [[ ! -d "$KNOWLEDGE_DIR" ]]; then
   exit 1
 fi
 
-log "=== auto-moc start | vault=$VAULT dry_run=$DRY_RUN topic=${TOPIC_FILTER:-all} ==="
+log "=== auto-moc start | vault=$VAULT dry_run=$DRY_RUN topic=${TOPIC_FILTER:-all} cache=$CLAUDE_BRIDGE_MOC_CACHE ==="
 
 TODAY="$(date '+%Y-%m-%d')"
+
+# ---- SQLite helpers (sqlite mode only) ----
+
+_moc_sql_esc() { printf '%s' "$1" | sed "s/'/''/g"; }
+
+ensure_moc_db() {
+  if [[ ! -f "$MOC_SCHEMA_SQL" ]]; then
+    log "WARN: schema.sql not found at $MOC_SCHEMA_SQL; skipping DB init"
+    return 1
+  fi
+  sqlite3 "$SQLITE_DB" < "$MOC_SCHEMA_SQL" 2>>"$LOG" || {
+    log "ERROR: failed to init MOC SQLite schema at $SQLITE_DB"; return 1
+  }
+  return 0
+}
+
+moc_db_exec() {
+  sqlite3 "$SQLITE_DB" "$1" 2>>"$LOG" || log "WARN: moc_db_exec failed: $1"
+}
+
+moc_db_query() {
+  sqlite3 "$SQLITE_DB" "$1" 2>>"$LOG"
+}
 
 # ---- Lock ----
 acquire_lock() {
@@ -218,13 +255,16 @@ fi
 SCAN_COUNT=$(wc -l < "$SCAN_LIST" | tr -d ' ')
 log "scan candidates: $SCAN_COUNT files"
 
-# ---- Extract tags per file ----
+# ---- Extract tags per file (full scan or incremental from cache) ----
 TAG_HITS="$WORK_DIR/tag-hits.txt"
 : > "$TAG_HITS"
 
-while IFS= read -r file; do
-  [[ -f "$file" ]] || continue
+# Helper: parse one file and emit tag<TAB>file lines to TAG_HITS.
+_parse_file_tags() {
+  local file="$1"
+  [[ -f "$file" ]] || return
 
+  local fm_tags
   fm_tags=$(awk '
     BEGIN { in_fm = 0; fm_seen = 0 }
     NR == 1 && /^---[[:space:]]*$/ { in_fm = 1; fm_seen = 1; next }
@@ -240,28 +280,98 @@ while IFS= read -r file; do
   if [[ -n "$fm_tags" ]]; then
     IFS=',' read -r -a tag_array <<< "$fm_tags"
     for t in "${tag_array[@]}"; do
-      t="${t## }"
-      t="${t%% }"
-      t="${t//\"/}"
-      t="${t//\'/}"
-      t=$(echo "$t" | tr '[:upper:]' '[:lower:]')
+      t="${t## }"; t="${t%% }"; t="${t//\"/}"; t="${t//\'/}"
+      t=$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')
       t="${t#\#}"
       [[ -n "$t" ]] && printf '%s\t%s\n' "$t" "$file" >> "$TAG_HITS"
     done
   fi
 
   while IFS= read -r hline; do
-    echo "$hline" | grep -oE '#[a-zA-Z][a-zA-Z0-9_-]+' | while IFS= read -r token; do
-      t="${token#\#}"
-      t=$(echo "$t" | tr '[:upper:]' '[:lower:]')
+    printf '%s' "$hline" | grep -oE '#[a-zA-Z][a-zA-Z0-9_-]+' | while IFS= read -r token; do
+      local t="${token#\#}"
+      t=$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')
       [[ -n "$t" ]] && printf '%s\t%s\n' "$t" "$file" >> "$TAG_HITS"
     done
   done < <(grep -E '^#+\s+' "$file" 2>/dev/null || true)
+}
 
-done < "$SCAN_LIST"
+if [[ "$CLAUDE_BRIDGE_MOC_CACHE" == "sqlite" ]]; then
+  # ---- Incremental scan: only re-parse files whose mtime > cached value ----
+  ensure_moc_db || { log "WARN: falling back to full scan (DB init failed)"; CLAUDE_BRIDGE_MOC_CACHE=scan; }
+fi
+
+if [[ "$CLAUDE_BRIDGE_MOC_CACHE" == "sqlite" ]]; then
+  if [[ "$MOC_INVALIDATE" -eq 1 ]]; then
+    log "invalidate: truncating moc_file_tags cache"
+    moc_db_exec "DELETE FROM moc_file_tags;"
+  fi
+
+  files_rescanned=0
+  files_cached=0
+
+  while IFS= read -r file; do
+    [[ -f "$file" ]] || continue
+    rel_file="${file#$VAULT/}"
+    current_mtime=$(stat -f '%m' "$file" 2>/dev/null || stat -c '%Y' "$file" 2>/dev/null || echo 0)
+    cached_mtime=$(moc_db_query "SELECT MAX(file_mtime) FROM moc_file_tags WHERE file_path='$(_moc_sql_esc "$rel_file")';" 2>/dev/null)
+    cached_mtime="${cached_mtime:-0}"
+
+    if [[ "$current_mtime" -gt "${cached_mtime:-0}" ]]; then
+      # File is newer than cache — reparse and refresh DB rows.
+      moc_db_exec "DELETE FROM moc_file_tags WHERE file_path='$(_moc_sql_esc "$rel_file")';"
+      _parse_file_tags "$file"
+
+      # Build a single transaction of INSERTs for this file's tags.
+      local_tags_file="$WORK_DIR/tags-for-insert-$$.txt"
+      grep -F "$file" "$TAG_HITS" | awk -F'\t' '{print $1}' | sort -u > "$local_tags_file" 2>/dev/null || true
+      if [[ -s "$local_tags_file" ]]; then
+        now_ts=$(date '+%Y-%m-%d %H:%M:%S')
+        {
+          echo "BEGIN;"
+          while IFS= read -r tag_val; do
+            [[ -z "$tag_val" ]] && continue
+            echo "INSERT OR REPLACE INTO moc_file_tags (file_path,tag,last_scanned_at,file_mtime) VALUES ('$(_moc_sql_esc "$rel_file")','$(_moc_sql_esc "$tag_val")','$now_ts',$current_mtime);"
+          done < "$local_tags_file"
+          echo "COMMIT;"
+        } | sqlite3 "$SQLITE_DB" 2>>"$LOG"
+        rm -f "$local_tags_file"
+      fi
+      files_rescanned=$((files_rescanned + 1))
+    else
+      # File unchanged — pull cached tag rows into TAG_HITS.
+      while IFS='|' read -r tag_val; do
+        [[ -z "$tag_val" ]] && continue
+        printf '%s\t%s\n' "$tag_val" "$file" >> "$TAG_HITS"
+      done < <(moc_db_query "SELECT tag FROM moc_file_tags WHERE file_path='$(_moc_sql_esc "$rel_file")';" 2>/dev/null)
+      files_cached=$((files_cached + 1))
+    fi
+  done < "$SCAN_LIST"
+
+  log "incremental scan: rescanned=$files_rescanned cached=$files_cached"
+
+  # Delete-detection: remove DB rows for files that no longer exist on disk.
+  del_count=0
+  while IFS='|' read -r rel_path; do
+    [[ -z "$rel_path" ]] && continue
+    abs_path="$VAULT/$rel_path"
+    if [[ ! -f "$abs_path" ]]; then
+      moc_db_exec "DELETE FROM moc_file_tags WHERE file_path='$(_moc_sql_esc "$rel_path")';"
+      del_count=$((del_count + 1))
+      log "delete-detection: removed stale cache rows for $rel_path"
+    fi
+  done < <(moc_db_query "SELECT DISTINCT file_path FROM moc_file_tags;" 2>/dev/null)
+  [[ "$del_count" -gt 0 ]] && log "delete-detection: pruned $del_count stale file(s) from cache"
+
+else
+  # ---- Full vault scan (default 'scan' mode) ----
+  while IFS= read -r file; do
+    _parse_file_tags "$file"
+  done < "$SCAN_LIST"
+fi
 
 TAG_HIT_COUNT=$(wc -l < "$TAG_HITS" | tr -d ' ')
-log "total tag hits: $TAG_HIT_COUNT"
+log "total tag hits: $TAG_HIT_COUNT (cache=$CLAUDE_BRIDGE_MOC_CACHE)"
 
 TAG_COUNTS="$WORK_DIR/tag-counts.txt"
 sort -u "$TAG_HITS" | awk -F'\t' '{ print $1 }' | sort | uniq -c | sort -rn > "$TAG_COUNTS"

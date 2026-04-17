@@ -261,6 +261,87 @@ SessionEnd hook
 | `sqlite-backend/com.example.sqlite-export.plist.template` | Hourly launchd export job template |
 | `hooks/session-end-vault-sync.sh` | Feature-flag detection; modified prompt + wrapper for `sqlite` mode |
 
+## Tier 3: SQLite WAL canonical storage (L4 Compaction + MOC cache)
+
+The same SQLite-as-canonical-store principle applied to L2 User Profile (Tier 3 first slice)
+is extended to L4's two long-running daemons.
+
+### L4 compaction proposals (`compaction_proposals` table)
+
+**Problem**: When `claude -p` is mid-run and the host crashes, there is no record that a
+proposal was in-flight. The user discovers orphaned state only by noticing a stray
+`.proposed.md` in the vault. There is also no audit trail of what was proposed, when, and
+by whom.
+
+**Solution**: Every proposal lifecycle is tracked in SQLite from staging to resolution.
+
+```
+compaction-daemon.sh (proposal run)
+  │  INSERT status='staged' + proposal_sha256='_pending'
+  │  claude -p → writes .proposed.md
+  │  UPDATE proposal_sha256 = sha256(file)
+  │
+  ├─ --apply path
+  │    Verify sha256 matches stored (tamper-check)
+  │    Merge into canonical summary
+  │    UPDATE status='applied', applied_at, applied_by=hostname
+  │
+  ├─ --discard YYYY-Qn
+  │    Remove .proposed.md from vault
+  │    UPDATE status='discarded'
+  │
+  └─ On startup: db_orphan_sweep()
+       staged rows with missing file → status='orphaned'
+```
+
+**Feature flag**: `CLAUDE_BRIDGE_COMPACTION_CACHE=sqlite` (default: `file` — no change to
+existing behaviour). Opt-in only.
+
+### L4 MOC cache (`moc_file_tags` table)
+
+**Problem**: Every weekly `auto-moc-daemon.sh` run is O(vault) even when only a handful of
+files changed. For vaults with hundreds of files this wastes I/O and CPU.
+
+**Solution**: Cache the per-file tag extraction in SQLite. On subsequent runs, compare `stat
+mtime` to the cached `file_mtime`. Only re-parse files that are newer; read unchanged files
+from the DB.
+
+```
+auto-moc-daemon.sh (sqlite mode)
+  For each candidate .md file:
+    if stat(mtime) > DB.file_mtime → reparse + DELETE old rows + INSERT new
+    else                           → read tags from DB (no file I/O)
+  After scan:
+    SELECT DISTINCT file_path FROM moc_file_tags
+    → DELETE rows for paths that no longer exist on disk
+```
+
+Second run on an unchanged vault is ≥10× faster than the first (scan-miss dominates the
+first run; cache-hit dominates the second).
+
+**Feature flag**: `CLAUDE_BRIDGE_MOC_CACHE=sqlite` (default: `scan` — existing full-vault
+behaviour). Opt-in only.
+
+**Escape hatch**: `auto-moc-daemon.sh --invalidate` truncates `moc_file_tags` and forces a
+full rebuild.
+
+### Decision log
+
+- **2026-Q1**: L4 does NOT call `claude -p` for MOC generation. MOC extraction is pure text
+  analysis. This invariant is preserved by the sqlite cache — it stores raw tag strings, not
+  LLM-generated content.
+
+### Files
+
+| File | Role |
+|------|------|
+| `sqlite-backend/schema.sql` | `compaction_proposals` + `moc_file_tags` tables + indexes |
+| `sqlite-backend/migrate-l4-cache.sh` | Seed DB from existing vault state (idempotent) |
+| `sqlite-backend/compaction-report.sh` | Read-only report: staged, applied, orphaned, MOC freshness |
+| `daemons/compaction/compaction-daemon.sh` | Flag-gated: stage → sha256 → apply/discard/orphan sweep |
+| `daemons/compaction/auto-moc-daemon.sh` | Flag-gated: incremental tag cache with delete detection |
+| `daemons/compaction/README.md` | Operational guide: flags, migration, rollback |
+
 ## Component inventory
 
 | Component | Path | Triggered by |
