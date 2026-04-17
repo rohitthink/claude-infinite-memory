@@ -1,3 +1,9 @@
+[![tests](https://github.com/rohitthink/claude-infinite-memory/actions/workflows/test.yml/badge.svg)](https://github.com/rohitthink/claude-infinite-memory/actions/workflows/test.yml)
+
+CI runs on Ubuntu; macOS-specific suites (APFS, mds, Spotlight, install-flow)
+auto-skip. See `tests/run-all-tests.sh --list` for the full per-suite
+platform gating.
+
 # claude-infinite-memory
 
 Turn your Obsidian vault into Claude Code's permanent, bidirectional
