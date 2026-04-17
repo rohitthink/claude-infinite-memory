@@ -71,6 +71,7 @@ LOG_MAX_BYTES=$((1024 * 1024))  # 1 MB
 LOCK_DIR="${CLAUDE_BRIDGE_HOME}/sync-active"
 LOCK="$LOCK_DIR/truenas-sync.lock"
 LOCK_WAIT_SEC=60
+HEARTBEAT_FILE="${CLAUDE_BRIDGE_HOME}/sync-state/truenas-sync-heartbeat.txt"
 
 FSWATCH="/opt/homebrew/bin/fswatch"
 RSYNC="/usr/bin/rsync"
@@ -469,6 +470,10 @@ do_sync() {
   duration=$((end - start))
 
   log_summary "$mode" "$duration" "$rc" "${bytes:-0}"
+  if (( rc == 0 )); then
+    mkdir -p "$(dirname "$HEARTBEAT_FILE")"
+    date +%s > "$HEARTBEAT_FILE" 2>/dev/null || true
+  fi
   (( rc == 0 )) || return 3
   return 0
 }
@@ -505,23 +510,62 @@ mode_watch() {
 
   do_sync watch-boot || true
 
-  local pending=0
+  # Supervisor loop: restart fswatch on crash with exponential backoff.
+  # Backoff: attempt * 5s, capped at 30s. Resets after a healthy long-running session.
+  local ATTEMPT=0
   while true; do
-    if IFS= read -r -t "$DEBOUNCE_SEC" _event; then
-      pending=1
-    else
-      if (( pending == 1 )); then
-        do_sync watch || true
-        pending=0
+    ATTEMPT=$(( ATTEMPT + 1 ))
+    log_line "fswatch starting (attempt=$ATTEMPT)"
+
+    local _run_start
+    _run_start=$(date +%s)
+    local pending=0
+
+    # Inner debounce loop driven by fswatch's process substitution.
+    # We distinguish "read timed out" (fswatch alive, no events) from
+    # "read returned EOF immediately" (fswatch died) by comparing elapsed
+    # time to DEBOUNCE_SEC: a near-instant return indicates a closed pipe.
+    while true; do
+      local _before _after _elapsed
+      _before=$(date +%s)
+      if IFS= read -r -t "$DEBOUNCE_SEC" _event; then
+        pending=1
+      else
+        _after=$(date +%s)
+        _elapsed=$(( _after - _before ))
+        if (( pending == 1 )); then
+          do_sync watch || true
+          pending=0
+        fi
+        # Elapsed well below DEBOUNCE_SEC → pipe closed (fswatch died)
+        if (( _elapsed < DEBOUNCE_SEC / 2 )); then
+          log_line "fswatch pipe closed (elapsed=${_elapsed}s); exiting inner loop"
+          break
+        fi
       fi
+    done < <("$FSWATCH" \
+                --latency=1 \
+                --exclude='\.obsidian/workspace' \
+                --exclude='\.obsidian/cache' \
+                --exclude='\.Trash' \
+                --exclude='\.DS_Store' \
+                "$VAULT" 2>>"$LOG")
+
+    local _run_duration=$(( $(date +%s) - _run_start ))
+    log_line "fswatch exited (attempt=$ATTEMPT run=${_run_duration}s); will restart after backoff"
+
+    # Reset backoff counter if the session ran long enough to be considered healthy
+    if (( _run_duration > DEBOUNCE_SEC * 10 )); then
+      ATTEMPT=0
     fi
-  done < <("$FSWATCH" \
-              --latency=1 \
-              --exclude='\.obsidian/workspace' \
-              --exclude='\.obsidian/cache' \
-              --exclude='\.Trash' \
-              --exclude='\.DS_Store' \
-              "$VAULT" 2>>"$LOG")
+
+    if [[ ! -d "$VAULT" ]]; then
+      log_line "vault not mounted; will retry"
+    fi
+
+    local sleep_time=$(( ATTEMPT < 5 ? ATTEMPT * 5 : 30 ))
+    sleep "$sleep_time"
+  done
 }
 
 # ---- Entrypoint ----
