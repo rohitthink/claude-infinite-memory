@@ -356,12 +356,42 @@ if [[ -f "$VAULT/07 - Claude Knowledge/Technical Learnings.md" ]]; then
   fi
 fi
 
-# ---- Baseline: User Profile (L2) ----
+# ---- Baseline: User Profile (L2) — reviewed sections only ----
+# Inject ONLY the four promoted sections: Communication style, Technical
+# preferences, Anti-patterns, Tooling preferences.
+# Pending review and Archive (stale) are intentionally excluded:
+#   - Pending entries are unreviewed signals, not yet authoritative
+#   - Archive entries are stale (>180d) and should not influence active sessions
+# This ensures only user-confirmed preferences shape behavior.
 USER_PROFILE=""
 USER_PROFILE_FILE="$VAULT/07 - Claude Knowledge/User Profile.md"
 if [[ -f "$USER_PROFILE_FILE" ]]; then
-  # Strip frontmatter, cap at 1200 bytes
-  up_body=$(awk 'BEGIN{fm=0} /^---$/{fm++; next} fm>=2 || fm==0 {print}' "$USER_PROFILE_FILE")
+  # Strip frontmatter, then extract only the four reviewed sections.
+  # Each section runs from its ## header until the next ## header (or EOF).
+  # Sections to include (exact heading text):
+  #   ## Communication style
+  #   ## Technical preferences
+  #   ## Anti-patterns
+  #   ## Tooling preferences
+  up_body=$(awk '
+    BEGIN { fm=0; printing=0 }
+    # Skip frontmatter
+    /^---$/ { fm++; next }
+    fm < 2 { next }
+    # Detect section headers
+    /^## / {
+      # Check if this is one of the four approved sections
+      if ($0 ~ /^## (Communication style|Technical preferences|Anti-patterns|Tooling preferences)$/) {
+        printing = 1
+        print
+        next
+      } else {
+        printing = 0
+        next
+      }
+    }
+    printing { print }
+  ' "$USER_PROFILE_FILE")
   if (( ${#up_body} > 1200 )); then
     up_body="${up_body:0:1200}
 [... truncated for length ...]"
