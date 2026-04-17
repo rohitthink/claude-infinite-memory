@@ -216,6 +216,26 @@ elif [[ -f "$CANONICAL_SESSION_LOG" ]]; then
   SESSION_LOG_FILE="$CANONICAL_SESSION_LOG"
 fi
 
+# ---- Path-containment validation ----
+# Topic-map includes are user-supplied config. A malicious edit (or typo) to
+# vault-topic-map.yaml could set include: ["../../etc/passwd"] or an absolute
+# path and read/inject arbitrary files via the SessionStart context. Mirror
+# the SessionEnd hook's realpath + prefix check.
+LOG_DIR="${CLAUDE_BRIDGE_HOME}/logs"
+SESSION_START_LOG="$LOG_DIR/session-start.log"
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+
+# Rotate the log at 1 MB to keep REJECTED entries greppable without unbounded growth
+if [[ -f "$SESSION_START_LOG" ]]; then
+  log_size=$(stat -f%z "$SESSION_START_LOG" 2>/dev/null || stat -c%s "$SESSION_START_LOG" 2>/dev/null || echo 0)
+  if [[ "$log_size" =~ ^[0-9]+$ ]] && (( log_size > 1048576 )); then
+    mv "$SESSION_START_LOG" "${SESSION_START_LOG}.1" 2>/dev/null || true
+  fi
+fi
+
+# Resolve vault root once; used for every prefix check below
+VAULT_RESOLVED=$(perl -e 'use Cwd "abs_path"; print abs_path($ARGV[0]) // ""' "$VAULT" 2>/dev/null)
+
 # ---- Gather topic-matched vault content ----
 # Budget: ~9KB total; each file gets a per-file cap of ~1800 bytes with
 # "[... truncated for length ...]" marker if exceeded. Baseline sections
@@ -226,7 +246,57 @@ USED=0
 
 for rel_path in "${MATCHED_FILES[@]}"; do
   [[ -z "$rel_path" ]] && continue
+
+  # --- Containment check 1: reject absolute paths ---
+  if [[ "$rel_path" == "/"* ]]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [session-start] REJECTED include path (absolute): $rel_path" >> "$SESSION_START_LOG"
+    continue
+  fi
+
+  # --- Containment check 2: reject paths with `..` components ---
+  # Matches leading "../", interior "/../", or trailing "/..".
+  if [[ "$rel_path" == "../"* || "$rel_path" == *"/../"* || "$rel_path" == *"/.." || "$rel_path" == ".." ]]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [session-start] REJECTED include path (parent traversal): $rel_path" >> "$SESSION_START_LOG"
+    continue
+  fi
+
+  # --- Containment check 3: reject documented-private "05 - Personal/" folder ---
+  # This folder is conventionally reserved for private content users may keep
+  # in their vault. Silent skip — a topic map accidentally listing it shouldn't
+  # spam the log.
+  if [[ "$rel_path" == "05 - Personal/"* ]]; then
+    continue
+  fi
+
   file="$VAULT/$rel_path"
+
+  # --- Containment check 4: realpath resolution must stay inside vault root ---
+  # Catches symlink escapes (e.g., a vault-level symlink pointing at /etc).
+  # perl abs_path is used for macOS-portability (GNU readlink -f / realpath -e
+  # behavior differs). If resolution fails (file doesn't exist, permission
+  # denied, etc.) we reject rather than trusting the un-resolved path.
+  resolved=$(perl -e 'use Cwd "abs_path"; print abs_path($ARGV[0]) // ""' "$file" 2>/dev/null)
+  if [[ -z "$resolved" ]]; then
+    # File missing is expected for optional includes — only log when it's NOT
+    # a missing file. We continue silently on missing files; the [[ -f ]]
+    # check below used to handle this.
+    [[ -f "$file" ]] || continue
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [session-start] REJECTED include path (unresolvable): $rel_path" >> "$SESSION_START_LOG"
+    continue
+  fi
+
+  if [[ -z "$VAULT_RESOLVED" || "$resolved" != "$VAULT_RESOLVED"/* ]]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [session-start] REJECTED include path outside vault: $rel_path (resolved=$resolved)" >> "$SESSION_START_LOG"
+    continue
+  fi
+
+  # --- Containment check 5: defense-in-depth, resolved path must not be under Personal/ ---
+  # Catches case where a symlink or unusual path component lands inside 05 - Personal/
+  # even though the rel_path itself didn't start with that prefix.
+  if [[ "$resolved" == *"/05 - Personal/"* ]]; then
+    continue
+  fi
+
   [[ -f "$file" ]] || continue
 
   # Strip frontmatter, cap at ~1500 bytes per file

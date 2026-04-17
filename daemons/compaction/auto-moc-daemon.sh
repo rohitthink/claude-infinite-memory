@@ -19,6 +19,18 @@
 #   5. Pure text analysis does NOT invoke `claude -p`. Deterministic
 #      and cheap.
 #
+# Security boundary (2026-04-16 audit fix):
+#   This daemon deliberately does NOT call `claude -p`. MOC generation is
+#   pure text analysis, so there is no LLM prompt surface and therefore
+#   no `--allowedTools` to narrow. If a future change introduces a
+#   `claude -p` call here, it MUST:
+#     - use `--allowedTools "Read,Write,Edit,Glob,Grep"` (no Bash, no
+#       Skill — vault content is untrusted multi-writer input);
+#     - prepend a DEFENSIVE PROMPT preamble telling the model to treat
+#       inline content as data, not instructions; and
+#     - mirror the compaction-daemon's human-in-the-loop pattern
+#       (proposal file + explicit --apply) for any destructive step.
+#
 # Flags:
 #   --dry-run                Plan only; no writes. Also DRYRUN=1.
 #   --topic <topic>          Regenerate only this topic (still gated by

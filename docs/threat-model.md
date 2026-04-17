@@ -78,6 +78,49 @@ hook reads arbitrary files and passes them to the child.
 **Residual risk**: A symlink inside `$CLAUDE_BRIDGE_HOME/projects/`
 pointing outside. `abs_path` resolves symlinks, so this is closed.
 
+### T3b: Topic map path traversal (L1)
+
+**Scenario**: The SessionStart hook reads a YAML topic map
+(`vault-topic-map.yaml`) and, for each rule that matches the session's `cwd`,
+injects the listed files as `additionalContext`. The include paths are
+user-supplied config. A malicious edit — or an innocent typo — could set
+`include: ["../../etc/passwd"]`, `include: ["/etc/passwd"]`, or a symlink
+target that escapes the vault root. Without a containment check the hook
+reads the file as-is, builds `"$VAULT/$rel_path"`, and emits the contents
+inside the untrusted-reference wrapper. That's still prompt-injection-scoped
+(the XML wrapper frames it as reference-only), but it's exfiltration: a
+regular filesystem read of a sensitive file, surfaced to every subsequent
+Claude session. Any attacker with write access to the topic map (local
+malware, a careless manual edit, a compromised sync peer) can trigger it.
+
+**Defenses**:
+1. The SessionStart hook rejects any include path starting with `/` (absolute
+   path).
+2. Rejects any path containing `..` as a component (`../x`, `x/../y`, `x/..`,
+   `..`).
+3. Rejects the documented-private `05 - Personal/` prefix (silent skip —
+   this folder is reserved for private content that should never enter
+   context).
+4. After joining `"$VAULT/$rel_path"`, resolves the full path via `perl
+   abs_path` and verifies the resolved path is a prefix-match for the
+   resolved vault root. This closes the symlink-escape case: a vault-level
+   symlink pointing at `/etc/passwd` resolves outside the vault and is
+   rejected.
+5. Defense-in-depth post-resolution check: if the resolved path contains
+   `/05 - Personal/` anywhere (e.g., via a symlink or unusual path
+   component), silently skip.
+6. Every rejection logs a timestamped `REJECTED` line to
+   `$CLAUDE_BRIDGE_HOME/logs/session-start.log` with the offending path so a
+   tampered topic map is greppable (`grep REJECTED session-start.log`). Log
+   rotates at 1 MB.
+
+**Residual risk**: Hardlinks are not resolved — `abs_path` resolves symlinks
+but a hardlink inside the vault pointing at content outside the vault root
+would still be read. Hardlinks across filesystems are impossible, and the
+vault is typically a single mount point, so the practical risk is low. A
+user deliberately placing a hardlink is out of scope (they already have
+read access to whatever they're hardlinking).
+
 ### T4: Race condition on concurrent vault writes
 
 **Scenario**: Two sessions end within seconds. Both spawn children. Both
@@ -178,8 +221,11 @@ catch. The actual risk is low because the query never reaches a shell.
 
 ## Audit trail
 
-- All hook rejections log to `$CLAUDE_BRIDGE_HOME/logs/obsidian-sync.log`
+- SessionEnd hook rejections log to `$CLAUDE_BRIDGE_HOME/logs/obsidian-sync.log`
   with `REJECTED` prefix + the resolved path for post-mortem analysis.
+- SessionStart hook rejections (topic-map traversal attempts, T3b) log to
+  `$CLAUDE_BRIDGE_HOME/logs/session-start.log` with timestamp + rejected
+  path.
 - All sync attempts log start/end with session_id.
 - Log rotation at 1MB keeps disk use bounded.
 
@@ -190,7 +236,9 @@ catch. The actual risk is low because the query never reaches a shell.
 2. Turn off Obsidian plugins you don't actively use.
 3. Run `macos-exclusions-setup.sh` so transcripts don't leak into
    Spotlight / Time Machine previews.
-4. Review `$CLAUDE_BRIDGE_HOME/logs/obsidian-sync.log` for `REJECTED`
-   entries monthly.
+4. Review `$CLAUDE_BRIDGE_HOME/logs/obsidian-sync.log` and
+   `$CLAUDE_BRIDGE_HOME/logs/session-start.log` for `REJECTED` entries
+   monthly — a compromised topic map or malicious transcript path will
+   leave a trail there.
 5. Periodically audit `07 - Claude Knowledge/*.md` for any content
    that looks unusual  prompt injection may leave visible traces.

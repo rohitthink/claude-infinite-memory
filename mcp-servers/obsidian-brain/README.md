@@ -18,6 +18,14 @@ All returned content is passed through a 17-pattern regex redactor that
 mirrors `hooks/session-end-vault-sync.sh`. If the vault is ever
 compromised, this server will not be a usable secret-exfil channel.
 
+**Output wrapping.** Every freeform string the server emits (file bodies,
+search excerpts, category-entry excerpts) is wrapped in
+`<untrusted-reference>` tags. Claude treats the contents as reference
+material — same trust tier as web search results — and will not follow
+embedded instructions ("ignore previous instructions", etc.). Short
+structural metadata (file paths, tag names, titles, similarity scores)
+stays unwrapped so downstream tooling can parse it cleanly.
+
 ## Architecture
 
 ```
@@ -165,20 +173,35 @@ sqlite3 ~/.claude/mcp-servers/obsidian-brain/index.db \
 
 ## Security model
 
-1. **Path containment.** `get_file` resolves the argument to an absolute path
-   via `Path.resolve()` and then calls `.relative_to(VAULT_ROOT)`  any
-   escape (`..`, symlinks, absolute paths) returns None and is rejected.
+1. **Path containment.** `get_file` (via `secure_resolve_vault_path`)
+   rejects empty/absolute paths, Unicode-normalizes to NFC (macOS APFS
+   stores filenames as NFD — without normalization an attacker can submit
+   NFD-composed bytes that slip past a naive prefix check), strips
+   traversal tokens (`..`, `.`) before any filesystem call, resolves both
+   the vault root and the target via `realpath` (closes the
+   "symlink-swapped-after-indexing" window), and checks containment with
+   `os.path.commonpath` (more robust than `str.startswith`).
 2. **Blocked folders.** `05 - Personal/` is never indexed and is also
-   rejected at read time, even if a rogue symlink pointed there.
+   rejected at read time on the **resolved, NFC-normalized relative
+   path** — a symlink aliasing a non-blocked name to a blocked folder
+   still fails the check.
 3. **Shell-injection filter.** `search_vault` rejects queries containing
    backticks, `$(...)`, obvious `rm -rf`, or `;;`/`&&`/`||` chains. The
    server never shells out on a query, but logging + rejection is easier
    to reason about than "it happens to be safe."
 4. **Redaction on response.** Every string the server returns passes
    through the same 17-category regex redactor as the session-sync hook.
-5. **Query-only DB.** The server opens the SQLite index with
+5. **Untrusted-content wrapping.** File bodies and excerpts are wrapped
+   in `<untrusted-reference>` tags so Claude treats them as reference
+   material (like web search results) rather than instructions. Defeats
+   prompt injection from compromised or third-party-authored notes.
+6. **Per-file chunk cap.** `search_vault` caps any single file at
+   `MAX_CHUNKS_PER_FILE` (2) results. Bounds the blast radius of an
+   embedding-poisoning attack where a single adversarially crafted note
+   dominates similarity across many queries.
+7. **Query-only DB.** The server opens the SQLite index with
    `PRAGMA query_only=ON`. It has no write path to the index.
-6. **Disposable cache.** The index DB is local-only, outside the vault,
+8. **Disposable cache.** The index DB is local-only, outside the vault,
    not synced. A compromise of the backup graph doesn't leak index data.
 
 ## Known quirks

@@ -107,10 +107,22 @@ and rejects anything outside the vault or under `05 - Personal/`.
 emergent topic clusters.
 
 **How**:
-- `daemons/compaction/compaction-daemon.sh` runs monthly. It reads
-  `Session Log.md` entries older than 90 days, spawns `claude -p` to
-  distill them into a quarterly summary, and moves the originals into
-  `_compacted-entries/YYYY-Qn/` (never deleted  restorable).
+- `daemons/compaction/compaction-daemon.sh` runs monthly in **proposal
+  mode** (human-in-the-loop). It reads `Session Log.md` entries older
+  than 90 days, spawns `claude -p` to distill them, and writes the
+  DISTILLED output to
+  `07 - Claude Knowledge/Historical Summaries/YYYY-Qn.proposed.md`.
+  **Nothing destructive happens automatically.** The Session Log is
+  left untouched and the originals are not moved.
+- The user reviews the `.proposed.md` file and runs
+  `compaction-daemon.sh --apply` to commit. `--apply` refuses to run
+  without an interactive TTY (or explicit `--yes`) and sanity-checks
+  that the proposal mtime is newer than the originals before
+  appending to the canonical `YYYY-Qn.md` summary, archiving originals
+  into `_compacted-entries/YYYY-Qn/`, and rewriting Session Log.md.
+  Technical Learnings follows the same pattern via
+  `Technical Learnings.proposed.md`.
+- `compaction-daemon.sh --list-pending` prints any staged proposals.
 - `daemons/compaction/auto-moc-daemon.sh` runs weekly. It scans the
   vault for tags appearing in >=5 files and generates a
   `07 - Claude Knowledge/MOCs/<tag>.md` Map of Content. Pure text, no
@@ -118,7 +130,17 @@ emergent topic clusters.
 
 **Why**: Knowledge decays in value over time. L4 prunes the noise while
 preserving the signal  and surfaces emergent themes the user might not
-have named yet.
+have named yet. The human-in-the-loop split (propose, review, apply)
+prevents a hallucinated `claude -p` summary from silently deleting
+months of history.
+
+**Safety (2026-04-16 audit)**: The `claude -p` subprocess is invoked
+with a minimal `--allowedTools "Read,Write,Edit,Glob,Grep"` — Bash and
+Skill are deliberately excluded so a prompt-injected vault file cannot
+pivot to shell execution. A defensive preamble is prepended to every
+prompt telling the model to treat the inline corpus as untrusted data,
+not instructions. The MOC daemon invokes no LLM and therefore has no
+allow-list to narrow.
 
 ## Component inventory
 
@@ -155,7 +177,9 @@ have named yet.
 7. Every 5 min, indexer daemon re-embeds any .md file newer than the DB.
 8. Every Sunday 04:00, auto-moc daemon walks the vault and updates MOCs.
 9. Every 1st-of-month 03:00, compaction daemon distills 90-day-old
-   entries into quarterly summaries and archives originals.
+   entries into a quarterly `*.proposed.md` staging file. No
+   destructive step runs until the user reviews and invokes
+   `compaction-daemon.sh --apply`.
 
 ## Multi-device topology
 
