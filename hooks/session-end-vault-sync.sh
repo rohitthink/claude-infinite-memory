@@ -19,7 +19,7 @@
 #   - mkdir-based flock serializes concurrent vault writes (race fix)
 #   - perl alarm gives claude -p a 300s hard timeout (zombie prevention)
 #   - pre-flight vault mount check after sleep 3 (volume unmount case)
-#   - 17-category regex secret redaction before child sees transcript
+#   - 27-category regex secret redaction before child sees transcript
 #   - realpath validates transcript_path is inside $CLAUDE_BRIDGE_HOME/projects/
 #   - Tempfiles in $CLAUDE_BRIDGE_HOME/sync-spool/ (persistent; survives TMPDIR purge)
 #   - Lockfile in $CLAUDE_BRIDGE_HOME/sync-active/ alongside env-var recursion guard
@@ -122,10 +122,21 @@ sed -E \
   -e 's/ya29\.[A-Za-z0-9_-]+/[REDACTED_GOOGLE_OAUTH]/g' \
   -e 's/xox[abpr]-[A-Za-z0-9-]{10,}/[REDACTED_SLACK_TOKEN]/g' \
   -e 's/glpat-[A-Za-z0-9_-]{20}/[REDACTED_GITLAB_PAT]/g' \
+  -e 's/eyJ0eX[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/[REDACTED_AZURE_JWT]/g' \
   -e 's/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/[REDACTED_JWT]/g' \
   -e 's/-----BEGIN [A-Z ]*PRIVATE KEY-----/[REDACTED_PRIVATE_KEY_START]/g' \
   -e 's/-----END [A-Z ]*PRIVATE KEY-----/[REDACTED_PRIVATE_KEY_END]/g' \
+  -e 's|Authorization:[[:space:]]*[Bb]earer[[:space:]]+[A-Za-z0-9._~+/\-]{10,}={0,2}|Authorization: [REDACTED_BEARER_TOKEN]|g' \
   -e 's/(password|passwd|passwort|secret|api[_-]?key|auth[_-]?token|bearer)[[:space:]"'\'':=]+[A-Za-z0-9!@#$%^&*()_+=/-]{8,}/\1=[REDACTED_SECRET]/gi' \
+  -e 's|AccountKey=[A-Za-z0-9+/=]{88}|[REDACTED_AZURE_STORAGE_KEY]|g' \
+  -e 's/hf_[A-Za-z0-9]{34,}/[REDACTED_HUGGINGFACE_KEY]/g' \
+  -e 's/dop_v1_[a-f0-9]{64}/[REDACTED_DIGITALOCEAN_TOKEN]/g' \
+  -e 's/sbp_[a-f0-9]{40}/[REDACTED_SUPABASE_KEY]/g' \
+  -e 's/sk_(test|live)_[A-Za-z0-9]{24,}/[REDACTED_STRIPE_KEY]/g' \
+  -e 's|postgresql://[^:[:space:]]+:[^@[:space:]]+@[^[:space:]]+|[REDACTED_POSTGRESQL_DSN]|g' \
+  -e 's|mysql://[^:[:space:]]+:[^@[:space:]]+@[^[:space:]]+|[REDACTED_MYSQL_DSN]|g' \
+  -e 's|mongodb(\+srv)?://[^:[:space:]]+:[^@[:space:]]+@[^[:space:]]+|[REDACTED_MONGODB_DSN]|g' \
+  -e 's|otpauth://[^[:space:]]+|[REDACTED_OTPAUTH_URI]|g' \
   "$TRANSCRIPT" > "$REDACTED_TRANSCRIPT" 2>/dev/null
 
 if [[ ! -s "$REDACTED_TRANSCRIPT" ]]; then
@@ -159,7 +170,7 @@ Transcript: $REDACTED_TRANSCRIPT (PRE-REDACTED for common secret patterns by the
 Timestamp: $TIMESTAMP
 
 IMPORTANT CONTEXT:
-- The transcript has already had common credential patterns (GitHub PATs, AWS keys, Anthropic/OpenAI/Google keys, JWTs, SSH private keys, Slack/GitLab tokens, generic password/secret/api_key/bearer patterns) replaced with [REDACTED_*] markers via regex pre-filtering. You do NOT need to re-redact those.
+- The transcript has already had common credential patterns (GitHub PATs, AWS keys, Anthropic/OpenAI/Google keys, Azure Storage/AD JWTs, HuggingFace/DigitalOcean/Supabase/Stripe keys, database DSNs, OTP URIs, Bearer tokens, JWTs, SSH private keys, Slack/GitLab tokens, generic password/secret/api_key/bearer patterns) replaced with [REDACTED_*] markers via regex pre-filtering. You do NOT need to re-redact those.
 - If you see any content resembling a secret that WASN'T caught by the regex (unusual token formats, company-specific credentials, hashes that could be tokens), omit it from your vault write — do NOT copy it into the vault under any circumstances.
 - The vault may be synced to a cloud service. Anything you write becomes cloud-resident.
 

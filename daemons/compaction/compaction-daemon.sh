@@ -52,7 +52,7 @@
 #   - Unsets CLAUDECODE + CLAUDE_CODE_ENTRYPOINT; sets
 #     CLAUDE_OBSIDIAN_SYNC_CHILD=1 so bridge hooks don't recurse.
 #   - perl alarm enforces 300s hard timeout on claude -p.
-#   - 17-category regex redaction on any content passed to claude -p.
+#   - 27-category regex redaction on any content passed to claude -p.
 #   - Log rotation at 1 MB.
 #
 # Flags:
@@ -281,7 +281,7 @@ if [[ "$DRY_RUN" != "1" ]] && [[ "$APPLY" -ne 1 ]]; then
   fi
 fi
 
-# ---- Redaction (17-category regex, same as session-end-vault-sync.sh) ----
+# ---- Redaction (27-category regex, same as session-end-vault-sync.sh) ----
 redact_to_stdout() {
   sed -E \
     -e 's/ghp_[A-Za-z0-9]{36}/[REDACTED_GITHUB_PAT]/g' \
@@ -296,10 +296,21 @@ redact_to_stdout() {
     -e 's/ya29\.[A-Za-z0-9_-]+/[REDACTED_GOOGLE_OAUTH]/g' \
     -e 's/xox[abpr]-[A-Za-z0-9-]{10,}/[REDACTED_SLACK_TOKEN]/g' \
     -e 's/glpat-[A-Za-z0-9_-]{20}/[REDACTED_GITLAB_PAT]/g' \
+    -e 's/eyJ0eX[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/[REDACTED_AZURE_JWT]/g' \
     -e 's/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/[REDACTED_JWT]/g' \
     -e 's/-----BEGIN [A-Z ]*PRIVATE KEY-----/[REDACTED_PRIVATE_KEY_START]/g' \
     -e 's/-----END [A-Z ]*PRIVATE KEY-----/[REDACTED_PRIVATE_KEY_END]/g' \
+    -e 's|Authorization:[[:space:]]*[Bb]earer[[:space:]]+[A-Za-z0-9._~+/\-]{10,}={0,2}|Authorization: [REDACTED_BEARER_TOKEN]|g' \
     -e 's/(password|passwd|passwort|secret|api[_-]?key|auth[_-]?token|bearer)[[:space:]"'\'':=]+[A-Za-z0-9!@#$%^&*()_+=/-]{8,}/\1=[REDACTED_SECRET]/gi' \
+    -e 's|AccountKey=[A-Za-z0-9+/=]{88}|[REDACTED_AZURE_STORAGE_KEY]|g' \
+    -e 's/hf_[A-Za-z0-9]{34,}/[REDACTED_HUGGINGFACE_KEY]/g' \
+    -e 's/dop_v1_[a-f0-9]{64}/[REDACTED_DIGITALOCEAN_TOKEN]/g' \
+    -e 's/sbp_[a-f0-9]{40}/[REDACTED_SUPABASE_KEY]/g' \
+    -e 's/sk_(test|live)_[A-Za-z0-9]{24,}/[REDACTED_STRIPE_KEY]/g' \
+    -e 's|postgresql://[^:[:space:]]+:[^@[:space:]]+@[^[:space:]]+|[REDACTED_POSTGRESQL_DSN]|g' \
+    -e 's|mysql://[^:[:space:]]+:[^@[:space:]]+@[^[:space:]]+|[REDACTED_MYSQL_DSN]|g' \
+    -e 's|mongodb(\+srv)?://[^:[:space:]]+:[^@[:space:]]+@[^[:space:]]+|[REDACTED_MONGODB_DSN]|g' \
+    -e 's|otpauth://[^[:space:]]+|[REDACTED_OTPAUTH_URI]|g' \
     "$1"
 }
 

@@ -11,7 +11,7 @@ over stdio. Exposes four tools:
   - list_topics()                 distinct tags from frontmatter + inline
   - recent_entries(category, limit) last N entries in a known category
 
-Content returned by any tool is passed through the same 17-category regex
+Content returned by any tool is passed through the same 27-category regex
 redaction used by the SessionEnd vault-sync hook so the MCP can't be used
 as a secret-exfil channel if the vault itself gets compromised.
 
@@ -169,7 +169,7 @@ logger = setup_logging()
 # ingestion filter; the MCP server must not be a second exfiltration vector
 # on query.
 #
-# 17 distinct categories cover the biggest leak families. Not exhaustive
+# 27 distinct categories cover the biggest leak families. Not exhaustive
 # this is defense-in-depth, not the primary guarantee.
 REDACTIONS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"ghp_[A-Za-z0-9]{36}"), "[REDACTED_GITHUB_PAT]"),
@@ -184,12 +184,22 @@ REDACTIONS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"ya29\.[A-Za-z0-9_\-]+"), "[REDACTED_GOOGLE_OAUTH]"),
     (re.compile(r"xox[abpr]-[A-Za-z0-9\-]{10,}"), "[REDACTED_SLACK_TOKEN]"),
     (re.compile(r"glpat-[A-Za-z0-9_\-]{20}"), "[REDACTED_GITLAB_PAT]"),
+    # Azure AD tokens share the eyJ0eX prefix; match before generic JWT.
+    (
+        re.compile(r"eyJ0eX[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+"),
+        "[REDACTED_AZURE_JWT]",
+    ),
     (
         re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"),
         "[REDACTED_JWT]",
     ),
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "[REDACTED_PRIVATE_KEY_START]"),
     (re.compile(r"-----END [A-Z ]*PRIVATE KEY-----"), "[REDACTED_PRIVATE_KEY_END]"),
+    # HTTP Authorization Bearer header — match before generic bearer pattern.
+    (
+        re.compile(r"(Authorization:\s*Bearer)\s+[A-Za-z0-9._~+/\-]{10,}={0,2}", re.IGNORECASE),
+        r"\1 [REDACTED_BEARER_TOKEN]",
+    ),
     # Generic password/secret/api_key/bearer assignment, e.g. `password=hunter22`.
     (
         re.compile(
@@ -198,11 +208,22 @@ REDACTIONS: list[tuple[re.Pattern[str], str]] = [
         ),
         lambda m: f"{m.group(1)}=[REDACTED_SECRET]",
     ),
-    # Unquoted bare tokens after common labels (e.g. `Authorization: Bearer eyJ...`)
-    (
-        re.compile(r"(Authorization:\s*Bearer)\s+[A-Za-z0-9._\-]{20,}", re.IGNORECASE),
-        r"\1 [REDACTED_BEARER]",
-    ),
+    # Azure Storage account key (88-char base64).
+    (re.compile(r"AccountKey=[A-Za-z0-9+/=]{88}"), "[REDACTED_AZURE_STORAGE_KEY]"),
+    # HuggingFace API token.
+    (re.compile(r"hf_[A-Za-z0-9]{34,}"), "[REDACTED_HUGGINGFACE_KEY]"),
+    # DigitalOcean personal access token.
+    (re.compile(r"dop_v1_[a-f0-9]{64}"), "[REDACTED_DIGITALOCEAN_TOKEN]"),
+    # Supabase service role / anon key.
+    (re.compile(r"sbp_[a-f0-9]{40}"), "[REDACTED_SUPABASE_KEY]"),
+    # Stripe secret key (test or live).
+    (re.compile(r"sk_(test|live)_[A-Za-z0-9]{24,}"), "[REDACTED_STRIPE_KEY]"),
+    # Database connection strings.
+    (re.compile(r"postgresql://[^:\s]+:[^@\s]+@\S+"), "[REDACTED_POSTGRESQL_DSN]"),
+    (re.compile(r"mysql://[^:\s]+:[^@\s]+@\S+"), "[REDACTED_MYSQL_DSN]"),
+    (re.compile(r"mongodb(?:\+srv)?://[^:\s]+:[^@\s]+@\S+"), "[REDACTED_MONGODB_DSN]"),
+    # OTP authenticator URI (contains account + secret).
+    (re.compile(r"otpauth://\S+"), "[REDACTED_OTPAUTH_URI]"),
 ]
 
 
