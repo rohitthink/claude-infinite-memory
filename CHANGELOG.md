@@ -6,6 +6,47 @@ Versioning: [Semantic Versioning 2.0.0](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-04-17
+
+### Changed
+
+- **N2** — `daemons/compaction/compaction-daemon.sh` now writes a
+  `<proposal>.sha256` sidecar file at proposal-generation time and
+  verifies it at `--apply` time. File mode (default
+  `CLAUDE_BRIDGE_COMPACTION_CACHE=file`) previously relied on an
+  mtime-only check during apply; SQLite mode tracked the canonical
+  sha256 in the `compaction_proposals` table. With sidecars, **file
+  mode now has the same sha256 tamper protection as SQLite mode** —
+  the `--apply` path refuses mismatched proposals unless
+  `FORCE_APPLY_MODIFIED=1` is set. Backward-compatible: a pre-v0.2.2
+  proposal with no sidecar silently passes the new check (only the
+  existing mtime guard applies). Sidecars are cleaned up alongside
+  `.proposed.md` on successful apply.
+
+- **N1** — `tests/run-all-tests.sh` tightens the `exit 77` SKIP
+  convention: a suite must now emit a line starting with `SKIP: ` on
+  stdout **in addition to** exiting 77 to be treated as skipped. A
+  test that exits 77 without the marker is treated as FAIL, not
+  silently masked. Prevents a buggy test whose exit code happens to
+  be 77 (awk parse errors, uncaught code paths) from hiding a real
+  failure behind a skip. The two existing skip-aware tests already
+  emit `SKIP: ` lines, so behavior is unchanged for them.
+
+### Added
+
+- `tests/test-compaction-sidecar-sha256.sh` — 6-case suite exercising
+  `write_proposal_sidecar` / `verify_proposal_sidecar`: writes a
+  64-char hex digest; verifies passes on unchanged file; rejects
+  tampered content; passes when sidecar is absent (backward-compat);
+  tolerates `unknown` sha value (platforms without sha256 tools);
+  round-trips on 4 KiB random binary content.
+- `tests/test-harness-exit77-discipline.sh` — 4-case suite that
+  builds two fixture tests in a tmpdir (one with `SKIP: ` marker +
+  exit 77, one exits 77 without the marker), runs the harness, and
+  asserts the first is reported as SKIP, the second as FAIL, the
+  harness exit code reflects the one failure, and the FAIL diagnostic
+  names the missing marker.
+
 ## [0.2.1] - 2026-04-17
 
 ### Changed

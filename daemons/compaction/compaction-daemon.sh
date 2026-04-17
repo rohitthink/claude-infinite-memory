@@ -348,6 +348,46 @@ sha256_file() {
   fi
 }
 
+# ---- Proposal sidecar helpers (N2 fix, v0.2.2) ----
+# Before v0.2.2, file-mode compaction (default CLAUDE_BRIDGE_COMPACTION_CACHE=file)
+# relied on an mtime check alone to detect tampered proposals during --apply.
+# SQLite mode tracked the canonical sha256 in the compaction_proposals table, so
+# it was genuinely tamper-evident; file mode was not.
+#
+# These helpers write a sha256 sidecar file next to every proposal at generation
+# time, and verify it at apply time. File mode now has sha256 tamper protection.
+# SQLite mode continues to treat the DB row as canonical; the sidecar is
+# belt-and-braces there (small overhead, consistent invariant).
+
+# Write <path>.sha256 containing the hex sha256 of <path>.
+# Returns 0 on success, 1 if the path is missing or the write fails.
+write_proposal_sidecar() {
+  local path="$1"
+  [[ -z "$path" || ! -f "$path" ]] && return 1
+  local sha
+  sha=$(sha256_file "$path")
+  # If we couldn't compute a digest (no sha256sum/shasum), the sidecar value
+  # is "unknown" — write it anyway so the reader knows digest-lookup was
+  # attempted (absent-sidecar means the proposal predates this feature).
+  printf '%s\n' "$sha" > "${path}.sha256" 2>/dev/null || return 1
+  return 0
+}
+
+# Verify a proposal matches its sidecar sha256 (if the sidecar exists).
+# Returns 0 if OK or sidecar absent (backward-compat for pre-v0.2.2 proposals).
+# Returns 1 if sidecar exists and the content has been modified.
+# Callers decide whether to respect the FORCE_APPLY_MODIFIED escape hatch.
+verify_proposal_sidecar() {
+  local path="$1"
+  local sidecar="${path}.sha256"
+  [[ -f "$sidecar" ]] || return 0      # no sidecar = pre-v0.2.2 = pass
+  local stored current
+  stored=$(head -n1 "$sidecar" 2>/dev/null | tr -d ' \t\n\r')
+  [[ -z "$stored" || "$stored" == "unknown" ]] && return 0  # no claim = pass
+  current=$(sha256_file "$path")
+  [[ "$stored" == "$current" ]]          # exit 0 iff digests match
+}
+
 # Escape a string for SQL single-quote context (double any single quotes).
 _sql_esc() { printf '%s' "$1" | sed "s/'/''/g"; }
 
@@ -618,7 +658,19 @@ if [[ "$APPLY" -eq 1 ]]; then
         exit 1
       fi
 
-      # sha256 tamper-check (sqlite mode only)
+      # N2 (v0.2.2): file-mode sha256 tamper-check via sidecar file.
+      # Works in both file and sqlite modes. Sidecar absence = pre-v0.2.2
+      # proposal or disabled sidecar write = silently pass (backward compat).
+      if ! verify_proposal_sidecar "$prop"; then
+        echo "ERROR: proposal $prop has been modified since generation (sha256 sidecar mismatch)." >&2
+        echo "       Regenerate the proposal (run without --apply) or pass --force-apply-modified to skip this check." >&2
+        if [[ "${FORCE_APPLY_MODIFIED:-0}" != "1" ]]; then
+          exit 1
+        fi
+        log "WARN: --force-apply-modified set; proceeding despite sidecar sha256 mismatch for $prop"
+      fi
+
+      # sha256 tamper-check (sqlite mode only — canonical DB-backed check)
       if [[ "$CLAUDE_BRIDGE_COMPACTION_CACHE" == "sqlite" ]]; then
         ensure_compaction_db || true
         rel_prop="${prop#$VAULT/}"
@@ -758,8 +810,8 @@ EOF
       mv "$NEW_SESSION_LOG" "$SESSION_LOG"
       log "rewrote $SESSION_LOG (removed $apply_count entries; backup at $APPLY_WORK/session-log-backup.md)"
 
-      rm -f "$prop"
-      log "removed applied proposal: $prop"
+      rm -f "$prop" "${prop}.sha256"
+      log "removed applied proposal: $prop (and sidecar if any)"
 
       # Mark applied in DB (sqlite mode)
       if [[ "$CLAUDE_BRIDGE_COMPACTION_CACHE" == "sqlite" ]]; then
@@ -788,7 +840,17 @@ EOF
       exit 1
     fi
 
-    # sha256 tamper-check for tech learnings (sqlite mode only)
+    # N2 (v0.2.2): file-mode sha256 tamper-check via sidecar.
+    if ! verify_proposal_sidecar "$TECH_PROPOSED"; then
+      echo "ERROR: proposal $TECH_PROPOSED has been modified since generation (sha256 sidecar mismatch)." >&2
+      echo "       Regenerate the proposal (run without --apply) or pass --force-apply-modified to skip." >&2
+      if [[ "${FORCE_APPLY_MODIFIED:-0}" != "1" ]]; then
+        exit 1
+      fi
+      log "WARN: --force-apply-modified set; proceeding despite sidecar sha256 mismatch for tech learnings"
+    fi
+
+    # sha256 tamper-check for tech learnings (sqlite mode only — canonical DB-backed check)
     if [[ "$CLAUDE_BRIDGE_COMPACTION_CACHE" == "sqlite" ]]; then
       ensure_compaction_db || true
       rel_tech="${TECH_PROPOSED#$VAULT/}"
@@ -864,8 +926,8 @@ EOF
     mv "$TECH_NEW" "$TECH_LEARNINGS"
     log "rewrote $TECH_LEARNINGS (deduplicated; pre-dedupe archived to $COMPACTED_DIR/$tech_archive_q/)"
 
-    rm -f "$TECH_PROPOSED"
-    log "removed applied proposal: $TECH_PROPOSED"
+    rm -f "$TECH_PROPOSED" "${TECH_PROPOSED}.sha256"
+    log "removed applied proposal: $TECH_PROPOSED (and sidecar if any)"
 
     # Mark applied in DB (sqlite mode)
     if [[ "$CLAUDE_BRIDGE_COMPACTION_CACHE" == "sqlite" ]]; then
@@ -1148,6 +1210,12 @@ PROMPT_EOF
       cp "$SUMMARY_OUT" "$PROPOSED_FILE"
       log "wrote proposal to $PROPOSED_FILE"
 
+      # N2 (v0.2.2): write sidecar sha256 — gives file mode tamper protection.
+      # sqlite mode gets it too (belt-and-braces alongside the DB-tracked sha).
+      write_proposal_sidecar "$PROPOSED_FILE" \
+        && log "wrote sidecar $PROPOSED_FILE.sha256" \
+        || log "WARN: failed to write sidecar for $PROPOSED_FILE"
+
       # Update staged row with computed sha256 (sqlite mode).
       if [[ "$CLAUDE_BRIDGE_COMPACTION_CACHE" == "sqlite" ]] && [[ -n "$_SESSION_PROPOSAL_DB_ID" ]]; then
         _sha=$(sha256_file "$PROPOSED_FILE")
@@ -1343,6 +1411,11 @@ _SQLEOF
     else
       cp "$TECH_SUMMARY_OUT" "$TECH_PROPOSED"
       log "wrote proposal to $TECH_PROPOSED"
+
+      # N2 (v0.2.2): write sidecar sha256 for file-mode tamper protection.
+      write_proposal_sidecar "$TECH_PROPOSED" \
+        && log "wrote sidecar $TECH_PROPOSED.sha256" \
+        || log "WARN: failed to write sidecar for $TECH_PROPOSED"
 
       # Update staged row with computed sha256 (sqlite mode).
       if [[ "$CLAUDE_BRIDGE_COMPACTION_CACHE" == "sqlite" ]] && [[ -n "$_TECH_PROPOSAL_DB_ID" ]]; then

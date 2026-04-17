@@ -168,13 +168,26 @@ run_suite() {
     return 0
   elif (( rc == 77 )); then
     # Autoconf convention: a suite may exit 77 to mean "SKIP — environment
-    # or install-state prerequisites are not met" (e.g., the suite needs a
-    # vault path, an installed daemon, etc.). Differs from macOS-only skip
-    # above in that the test itself chose to skip at runtime.
-    printf '%-60s %s\n' "$label" "SKIP (needs env/deps)"
+    # or install-state prerequisites are not met". Differs from macOS-only
+    # skip above in that the test itself chose to skip at runtime.
+    #
+    # N1 hardening (v0.2.2): exit 77 alone is NOT enough to grant SKIP
+    # status. The suite MUST also emit a line starting with "SKIP: " on
+    # stdout/stderr to DECLARE its intent. This prevents a buggy test
+    # that coincidentally exits 77 (e.g. an uncaught awk error path,
+    # a custom error code) from being silently masked as a skip.
     local reason
     reason=$(grep -m1 '^SKIP: ' "$log" 2>/dev/null || true)
-    [[ -n "$reason" ]] && printf '       └─ %s\n' "$reason"
+    if [[ -z "$reason" ]]; then
+      printf '%-60s FAIL  (%ds, rc=77 with no SKIP: marker)\n' "$label" "$elapsed"
+      printf '       └─ exit 77 without an explicit "SKIP: ..." line is treated as failure.\n'
+      printf '       └─ if this test meant to skip, emit  echo "SKIP: <reason>"  before exit 77.\n'
+      printf '       └─ tail of output (%s):\n' "$log"
+      tail -n 20 "$log" | sed 's/^/       │ /'
+      return 1
+    fi
+    printf '%-60s %s\n' "$label" "SKIP (needs env/deps)"
+    printf '       └─ %s\n' "$reason"
     rm -f "$log"
     return 3
   else
