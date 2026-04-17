@@ -215,6 +215,39 @@ minute), numbered entries dedup cleanly, and the global mkdir lock is sufficient
 to serialize within a device. Cross-device contention on it is rare enough that
 Obsidian Sync conflict handling is acceptable.
 
+## 2026-Q2  Why APFS snapshots as a first-class local-backup path
+
+**Context**: Users who keep their Obsidian vault on an APFS volume have an
+under-utilized primitive available: `clonefile(2)` via `cp -cR`. A clone of a
+2 GB vault is created in under a second and consumes near-zero additional disk
+until individual files diverge from the original.
+
+**Options considered**:
+
+- *Time Machine*: slow, imprecise (hourly), cannot be triggered programmatically
+  on demand before a risky operation. Also does not give the user a plain
+  directory they can browse in Finder.
+- *Obsidian Sync version history*: designed for cross-device sync, not local
+  point-in-time versioning. Version history is per-file and buried in the sync
+  panel — not a "snapshot I can restore in one step."
+- *rsync to a local directory*: functionally correct, but re-reads every file on
+  each run regardless of whether content changed, and does not exploit the
+  APFS clone relationship. A 2 GB vault takes seconds instead of milliseconds.
+- *`cp -cR` (clonefile)*: near-instantaneous, near-zero storage overhead until
+  diverged, requires no extra software (ships with macOS), produces a plain
+  directory the user can browse or restore from with Finder. The `-c` flag is the
+  sole difference from a naive copy.
+
+**Decision**: ship `scripts/apfs-snapshot.sh` as a lightweight wrapper around
+`cp -cR`. The script verifies APFS + same-volume preconditions, prunes old
+snapshots beyond a configurable `--keep N` threshold, and prints a clear
+comparison of apparent vs on-disk size so users can confirm the clone mechanism
+is active. It is opt-in (not wired as a LaunchAgent by default) and Linux users
+who call it are rejected early with a clear message.
+
+**Reference**: `scripts/apfs-snapshot.sh`, `scripts/apfs-clone-status.sh`,
+`docs/macos-specific.md § APFS cloning and vault backups`.
+
 ## 2026-Q1  Why publish this under MIT
 
 MIT is permissive. Anyone can use, modify, redistribute, or fork without

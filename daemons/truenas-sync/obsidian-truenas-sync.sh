@@ -86,6 +86,9 @@ MIN_MD_FILES="${MIN_MD_FILES:-50}"
 MIN_VAULT_BYTES="${MIN_VAULT_BYTES:-100000}"
 MAX_DELETE_PCT="${MAX_DELETE_PCT:-20}"
 
+# Escape-hatch for extra rsync flags (e.g. --bwlimit=1000). Default empty.
+CLAUDE_BRIDGE_RSYNC_FLAGS_EXTRA="${CLAUDE_BRIDGE_RSYNC_FLAGS_EXTRA:-}"
+
 # Flag state
 FORCE_DELETE=0
 NO_DELETE=0
@@ -118,10 +121,11 @@ Required env (set via claude-infinite-memory.env):
   CLAUDE_BRIDGE_TRUENAS_PATH   remote path (trailing slash recommended)
 
 Optional:
-  CLAUDE_BRIDGE_HOME           defaults to ~/.claude
-  MIN_MD_FILES                 min .md count in source (default 50)
-  MIN_VAULT_BYTES              min total vault size in bytes (default 100000)
-  MAX_DELETE_PCT               abort if rsync would delete >N% of remote (default 20)
+  CLAUDE_BRIDGE_HOME              defaults to ~/.claude
+  MIN_MD_FILES                    min .md count in source (default 50)
+  MIN_VAULT_BYTES                 min total vault size in bytes (default 100000)
+  MAX_DELETE_PCT                  abort if rsync would delete >N% of remote (default 20)
+  CLAUDE_BRIDGE_RSYNC_FLAGS_EXTRA extra rsync flags appended to every invocation (default empty)
 EOF
 }
 
@@ -137,6 +141,20 @@ log_init() {
     fi
   fi
   touch "$LOG"
+
+  # Detect rsync flavor and warn if openrsync (macOS system rsync) is in use.
+  # openrsync has rsync-2.6.9-compatible --stats output that differs from GNU
+  # rsync 3.x; parse_would_delete handles alternate patterns, but the user
+  # should know which path is active.
+  local rsync_ver_line
+  rsync_ver_line=$("$RSYNC" --version 2>/dev/null | head -1)
+  if echo "$rsync_ver_line" | grep -qi 'openrsync'; then
+    log_line "WARN: rsync flavor=openrsync (macOS system rsync, rsync-2.6.9-compat); alternate --stats parse path active"
+  else
+    local rsync_ver
+    rsync_ver=$(echo "$rsync_ver_line" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
+    log_line "rsync flavor=GNU version=${rsync_ver:-unknown}"
+  fi
 }
 
 log_line() {
@@ -183,9 +201,18 @@ probe_ssh() {
   # doesn't resolve via DNS. Perl's IO::Socket::INET only speaks hostnames and
   # IPs — it ignores ~/.ssh/config. Use `ssh -G` (local-only, no network) to
   # resolve the alias to its real hostname/IP first, then TCP-probe that.
+  #
+  # `ssh -G` is wrapped in a 5s perl alarm so that ProxyCommand or Match exec
+  # directives in ~/.ssh/config that depend on unavailable external resources
+  # (VPN, captive portal) cannot block indefinitely. On timeout, degrade to a
+  # raw TCP probe against the literal REMOTE_HOST string and log the degradation.
   local real_host
-  real_host=$("$SSH" -G "$REMOTE_HOST" 2>/dev/null | awk '/^hostname / {print $2; exit}')
-  [[ -z "$real_host" ]] && real_host="$REMOTE_HOST"
+  real_host=$("$PERL" -e 'alarm 5; exec @ARGV' "$SSH" -G "$REMOTE_HOST" 2>/dev/null \
+    | awk '/^hostname / {print $2; exit}')
+  if [[ -z "$real_host" ]]; then
+    log_line "WARN: ssh -G alias resolution timed out or failed; degrading to raw TCP probe against $REMOTE_HOST"
+    real_host="$REMOTE_HOST"
+  fi
   "$PERL" -MIO::Socket::INET -e '
     alarm 5;
     my $s = IO::Socket::INET->new(PeerAddr=>$ARGV[0], PeerPort=>22, Timeout=>3)
@@ -275,6 +302,8 @@ _rsync_run() {
 
   local -a rsync_args=(
     -a --partial --human-readable --stats
+    --inplace
+    --fuzzy --fuzzy
     --exclude='.obsidian/workspace*'
     --exclude='.obsidian/cache*'
     --exclude='.Trash/'
@@ -287,6 +316,12 @@ _rsync_run() {
   if [[ "$mode" == "dry" ]]; then
     rsync_args+=(-n)
   fi
+  # User-supplied extra flags (escape hatch; default empty)
+  if [[ -n "$CLAUDE_BRIDGE_RSYNC_FLAGS_EXTRA" ]]; then
+    # Word-split intentional: user provides space-separated flags
+    # shellcheck disable=SC2206
+    rsync_args+=($CLAUDE_BRIDGE_RSYNC_FLAGS_EXTRA)
+  fi
   rsync_args+=("${VAULT%/}/" "$REMOTE_HOST:$REMOTE_PATH")
 
   "$PERL" -e 'alarm shift @ARGV; exec @ARGV' "$RSYNC_TIMEOUT_SEC" \
@@ -297,17 +332,43 @@ _rsync_run() {
   return $rc
 }
 
-# Parse "Number of deleted files: N" from rsync --stats output.
+# Parse deleted-file count from rsync --stats output.
+# GNU rsync 3.x: "Number of deleted files: N"
+# openrsync (macOS, rsync-2.6.9 compat): "deleted files: N" or "files deleted: N"
+# or absent entirely — in which case we count "^deleting " lines as a fallback.
+# FAIL CLOSED: if no pattern matches and no deleting lines, emit "" so the
+# caller can abort rather than silently proceeding with an unknown delete count.
 parse_would_delete() {
   local out="$1"
-  local n
-  n=$(awk -F: '/Number of deleted files/ { gsub(/[^0-9]/, "", $2); print $2; exit }' "$out" 2>/dev/null)
+  local n=""
+
+  # Pattern 1: GNU rsync 3.x
+  n=$(awk -F: '/^Number of deleted files:/ { gsub(/[^0-9]/, "", $2); if ($2 != "") { print $2; exit } }' "$out" 2>/dev/null)
+
+  # Pattern 2: openrsync truncated / alternate label
   if [[ -z "$n" ]]; then
-    # grep -c returns exit 1 when no matches, so suppress and default to 0.
-    n=$(grep -c '^deleting ' "$out" 2>/dev/null)
-    [[ -z "$n" ]] && n=0
+    n=$(awk -F: '/^[Dd]eleted files:/ { gsub(/[^0-9]/, "", $2); if ($2 != "") { print $2; exit } }' "$out" 2>/dev/null)
   fi
-  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+
+  # Pattern 3: "files deleted: N" ordering variant
+  if [[ -z "$n" ]]; then
+    n=$(awk -F: '/^[Ff]iles deleted:/ { gsub(/[^0-9]/, "", $2); if ($2 != "") { print $2; exit } }' "$out" 2>/dev/null)
+  fi
+
+  # Fallback: count "^deleting " lines emitted by rsync -v/--itemize-changes
+  if [[ -z "$n" ]]; then
+    local cnt
+    cnt=$(grep -c '^deleting ' "$out" 2>/dev/null || echo "")
+    if [[ -n "$cnt" && "$cnt" =~ ^[0-9]+$ ]]; then
+      n="$cnt"
+    fi
+  fi
+
+  # Validate: must be a non-negative integer; empty string = parse failure (caller aborts)
+  if [[ -n "$n" && ! "$n" =~ ^[0-9]+$ ]]; then
+    n=""
+  fi
+
   echo "$n"
 }
 
@@ -375,7 +436,6 @@ deletion_threshold_check() {
   tmp=$(_rsync_run dry with-delete)
   rc=$?
   would=$(parse_would_delete "$tmp")
-  STAT_WOULD_DELETE="$would"
   remote=$(remote_file_count "$tmp")
 
   if (( rc != 0 )); then
@@ -386,6 +446,20 @@ deletion_threshold_check() {
     rm -f "$tmp"
     return 1
   fi
+
+  # Fail closed: if we could not parse the delete count, abort rather than
+  # silently bypassing the deletion-threshold guard (openrsync output mismatch).
+  if [[ -z "$would" ]]; then
+    log_abort "ABORT: could not parse delete count from rsync --stats output (openrsync format mismatch?); aborting to prevent silent guard bypass"
+    log_line "  rsync output tail:"
+    tail -n 8 "$tmp" 2>/dev/null | while IFS= read -r line; do
+      log_line "  $line"
+    done
+    rm -f "$tmp"
+    return 1
+  fi
+
+  STAT_WOULD_DELETE="$would"
   rm -f "$tmp"
 
   if (( remote <= 0 )); then
@@ -452,6 +526,13 @@ do_sync() {
     log_summary "$mode" 0 5 0
     return 5
   fi
+
+  # Log vault clone stats so users can correlate when backup "inflates" because
+  # APFS clones have diverged. On non-APFS systems the sizes will be equal.
+  local _apparent_kb _disk_kb
+  _apparent_kb=$(find "$VAULT" -type f -exec stat -f '%z' {} \; 2>/dev/null | awk '{s+=$1} END {printf "%d", s/1024}')
+  _disk_kb=$(du -sk "$VAULT" 2>/dev/null | awk '{print $1}')
+  log_line "vault file_count=${STAT_MD_COUNT:-NA} total_bytes=${STAT_TOTAL_BYTES:-NA} apparent_kb=${_apparent_kb:-NA} disk_kb=${_disk_kb:-NA} (APFS clones may keep disk_kb below apparent_kb)"
 
   if ! probe_ssh; then
     log_summary "$mode" 0 2 0
