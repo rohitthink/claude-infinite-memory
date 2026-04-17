@@ -107,3 +107,28 @@ export CLAUDE_BRIDGE_TECHLEARN_BACKEND="${CLAUDE_BRIDGE_TECHLEARN_BACKEND:-markd
 # you use other people's LaunchAgents under com.example.*. The install script
 # will rewrite the plist templates using this value.
 export CLAUDE_BRIDGE_LABEL_PREFIX="${CLAUDE_BRIDGE_LABEL_PREFIX:-com.example}"
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: L4 compaction — SQLite proposal tracking
+# -----------------------------------------------------------------------------
+# 'file'   (default) — proposals tracked only as *.proposed.md files on disk.
+#                      No SQLite writes. Existing behaviour unchanged.
+# 'sqlite' — every proposal is tracked in SQLite from staging to apply/discard.
+#            Enables sha256 tamper-detection on --apply, orphan detection on
+#            startup, and structured compaction-report.sh output.
+#
+# Run `sqlite-backend/migrate-l4-cache.sh` once after switching to 'sqlite'.
+export CLAUDE_BRIDGE_COMPACTION_CACHE="${CLAUDE_BRIDGE_COMPACTION_CACHE:-file}"
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: L4 MOC cache — incremental tag extraction
+# -----------------------------------------------------------------------------
+# 'scan'   (default) — full O(vault) scan on every weekly run.
+# 'sqlite' — incremental: re-parse only files whose mtime > cached value.
+#            Second run on an unchanged vault is ≥10× faster than the first.
+#            Use `auto-moc-daemon.sh --invalidate` to force a full rebuild.
+#
+# Also: MOC_MIN_FILES overrides the minimum file-reference count for a tag
+# to qualify for a MOC (default: 5).
+export CLAUDE_BRIDGE_MOC_CACHE="${CLAUDE_BRIDGE_MOC_CACHE:-scan}"
+# export MOC_MIN_FILES=5
