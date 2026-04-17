@@ -27,9 +27,16 @@
 #     - use `--allowedTools "Read,Write,Edit,Glob,Grep"` (no Bash, no
 #       Skill — vault content is untrusted multi-writer input);
 #     - prepend a DEFENSIVE PROMPT preamble telling the model to treat
-#       inline content as data, not instructions; and
+#       inline content as data, not instructions;
 #     - mirror the compaction-daemon's human-in-the-loop pattern
-#       (proposal file + explicit --apply) for any destructive step.
+#       (proposal file + explicit --apply) for any destructive step; and
+#     - use create_sandbox() + validate_sandbox_output() from
+#       compaction-daemon.sh to constrain Write/Edit to a per-run sandbox
+#       under CLAUDE_BRIDGE_HOME/compaction-sandbox/<run-id>/ with
+#       post-hoc path validation (Gemini Tier-2 finding #2). A prompt-
+#       injected payload targeting ~/.zshrc or .git/hooks/ must be
+#       rejected and the proposal discarded. See compaction-daemon.sh for
+#       the reference implementation.
 #
 # Flags:
 #   --dry-run                Plan only; no writes. Also DRYRUN=1.
