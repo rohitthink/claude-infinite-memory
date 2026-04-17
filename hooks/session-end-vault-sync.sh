@@ -192,11 +192,13 @@ Preserve existing content; never overwrite. Always append.
 USER PROFILE UPDATE (L2 — learning brain accumulation):
 After extracting standard outcomes, do a SECOND pass over the transcript specifically to detect USER PREFERENCE SIGNALS. The goal: accumulate a durable profile at \`07 - Claude Knowledge/User Profile.md\` so future sessions adapt without the user re-explaining themselves.
 
-Read \`07 - Claude Knowledge/User Profile.md\` first (create it from the seed template if missing). It has four sections:
+Read \`07 - Claude Knowledge/User Profile.md\` first (create it from the seed template if missing). It has these sections:
   - ## Communication style
   - ## Technical preferences
   - ## Anti-patterns (things that didn't work)
   - ## Tooling preferences
+  - ## Pending review   ← WHERE NEW PREFERENCES LAND (gated; not yet authoritative)
+  - ## Archive (stale)  ← decay-archived entries (do not add here manually)
 
 Scan the transcript for:
   1. EXPLICIT signals — direct statements by the user:
@@ -213,12 +215,35 @@ Scan the transcript for:
      - Explicit post-mortems where the user documents what went wrong
 
 Rules for writing to User Profile.md:
-  - APPEND-ONLY. Never overwrite existing entries.
-  - DE-DUPE: before appending, Grep the target section for an equivalent entry. If found, append " (seen 2x, last $TIMESTAMP)" to the existing line — or increment the counter if one exists. Do NOT duplicate lines.
-  - Each new entry: one-liner starting with "- " followed by the preference, optionally with a short parenthetical source context. Example: \`- Prefers terse output, no preamble (confirmed explicitly $TIMESTAMP)\`
+
+  CRITICAL — NEVER AUTO-PROMOTE:
+  - New preference signals MUST go to ## Pending review ONLY. NEVER write directly to
+    ## Communication style, ## Technical preferences, ## Anti-patterns, or ## Tooling preferences.
+    Those sections are only updated by the user via the /promote-prefs skill.
+
+  FORMAT for Pending review entries:
+  - \`- TIMESTAMP — "preference text" (source: session SESSION_ID, confidence: LEVEL)\`
+  - TIMESTAMP = ISO-8601 UTC timestamp (e.g. 2026-04-17T10:00:00Z)
+  - confidence: high (explicit "I prefer X"), medium (2+ implicit occurrences), low (single implicit)
+  - Example: \`- 2026-04-17T10:00:00Z — "prefers Python type hints on public APIs" (source: session $SESSION_ID, confidence: high)\`
+
+  DE-DUPE EXISTING PENDING ENTRIES:
+  - Before adding a new Pending entry, Grep ## Pending review for semantically equivalent text.
+  - If an equivalent pending entry exists: do NOT add a duplicate. Skip.
+
+  REINFORCEMENT for PROMOTED entries (already in main sections):
+  - Grep each main section (## Communication style, ## Technical preferences, etc.) for semantically equivalent entries.
+  - If a re-observation of an EXISTING promoted preference is detected, find that line and:
+    a) Increment its "(seen Nx)" counter (or append "(seen 2x)" if no counter yet)
+    b) Update or append \`last-reinforced: YYYY-MM-DD\` at the end of that line (where YYYY-MM-DD = today)
+  - This keeps the decay mechanism from archiving actively-used preferences.
+  - Do NOT duplicate lines — only update in place.
+
+  OTHER RULES:
+  - APPEND-ONLY. Never overwrite or delete existing entries.
   - If no preference signals are present in this transcript, DO NOT touch User Profile.md. Skip silently.
-  - Keep each section under ~30 entries total; if a section is overflowing, consolidate similar entries into one and note the consolidation timestamp.
-  - Update the \`last-updated:\` frontmatter field to today's date if (and only if) you appended anything.
+  - Keep ## Pending review under ~50 entries total; if overflowing, note "(overflow — run /promote-prefs to clear)" but do not auto-promote.
+  - Update the \`last-updated:\` frontmatter field to today's date if (and only if) you appended or updated anything.
 
 Be conservative. A single vague statement is NOT a preference — look for explicit language OR repetition. When in doubt, don't write. False positives pollute the profile more than a missed signal hurts.
 PROMPT_EOF

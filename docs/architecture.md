@@ -71,15 +71,68 @@ every session.
 
 **How**: The SessionEnd hook's child `claude -p` job scans the transcript
 for preference signals (explicit "I prefer X" statements, implicit repeated
-corrections, documented anti-patterns) and appends de-duplicated entries to
-`07 - Claude Knowledge/User Profile.md`.
+corrections, documented anti-patterns) and writes them into a **Pending
+review** gate in `07 - Claude Knowledge/User Profile.md`. The user runs
+`/promote-prefs` to move entries into the authoritative sections. A monthly
+`scripts/decay-prefs.sh` demotes preferences unseen for >180 days into an
+Archive section (recoverable, not deleted).
 
 **Why**: The single biggest friction in agent work is re-explaining your
-preferences every session. L2 amortizes that cost to zero.
+preferences every session. L2 amortizes that cost to zero. The Pending gate
+prevents a single misclassified signal from permanently polluting the
+profile. The decay mechanism keeps the profile current over months.
 
-**Shape**: Append-only. Four sections: Communication style, Technical
-preferences, Anti-patterns, Tooling preferences. De-duped by Grep before
-append; consolidated when any section exceeds ~30 entries.
+**Shape**: Six sections in User Profile.md:
+
+| Section | Writable by | Injected at SessionStart |
+|---|---|---|
+| Communication style | `/promote-prefs` only | Yes |
+| Technical preferences | `/promote-prefs` only | Yes |
+| Anti-patterns | `/promote-prefs` only | Yes |
+| Tooling preferences | `/promote-prefs` only | Yes |
+| Pending review | SessionEnd hook | No (unreviewed) |
+| Archive (stale) | `decay-prefs.sh` only | No (stale) |
+
+**L2 preference lifecycle**:
+
+```
+  SessionEnd hook detects signal
+            │
+            ▼
+  ┌─────────────────────┐
+  │   ## Pending review │  ← gated; NOT injected at SessionStart
+  │   (timestamped,     │
+  │    confidence level)│
+  └──────────┬──────────┘
+             │  user runs /promote-prefs
+             │
+    ┌────────┼──────────────┐
+    │        │              │
+    ▼        ▼              ▼
+ Promote   Merge with   Discard
+    │      existing        │
+    │         │            └─ removed
+    ▼         ▼
+  ┌─────────────────────────────┐
+  │  ## Communication style     │  ← authoritative; injected at SessionStart
+  │  ## Technical preferences   │    entries carry last-reinforced: YYYY-MM-DD
+  │  ## Anti-patterns           │
+  │  ## Tooling preferences     │
+  └────────────────┬────────────┘
+                   │  decay-prefs.sh (monthly)
+                   │  if last-reinforced > 180 days ago
+                   ▼
+  ┌─────────────────────────────┐
+  │  ## Archive (stale)         │  ← recoverable; NOT injected at SessionStart
+  │  (archived YYYY-MM-DD,      │
+  │   was in: <section>)        │
+  └─────────────────────────────┘
+```
+
+**Reinforcement**: Each time a promoted preference is re-observed in a
+session, the SessionEnd hook increments its `(seen Nx)` counter and updates
+`last-reinforced: YYYY-MM-DD`. This prevents the decay pass from archiving
+actively-used preferences.
 
 ### L3: Semantic search (MCP)
 
