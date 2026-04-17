@@ -105,6 +105,78 @@ Upgrading fswatch to 1.17+ (via `brew upgrade fswatch`) greatly reduces the freq
 
 The two-condition gate (stale heartbeat **and** recent vault activity) avoids false alarms during legitimate quiet periods (overnight, when no Obsidian notes are being written).
 
+## APFS cloning and vault backups
+
+### What is `clonefile(2)`?
+
+macOS APFS volumes support *copy-on-write cloning* via the `clonefile(2)` syscall. When you clone a file, both the original and the clone share the same underlying data blocks on disk. No additional storage is consumed until one of the files is modified — at that point, only the changed blocks are written to new physical locations. From the user's perspective, cloning a 2 GB vault is instantaneous and costs near-zero disk space.
+
+`cp -cR <src> <dest>` (note the `-c` flag) invokes `clonefile(2)` for each file when source and destination are on the same APFS volume. `cp -R` without `-c` always does a full copy, even on APFS.
+
+### Why rsync doesn't preserve clones across a wire
+
+rsync is a wire protocol. It reads the logical bytes of each file and transfers them to a remote host. There is no concept of "shared block" in the rsync protocol — the remote side receives the file contents and writes them independently. APFS clone relationships are purely a local, on-disk primitive; they cannot survive a network transfer.
+
+This means: even if your local vault has 100 Obsidian notes that are clones of each other (e.g. created via "Duplicate" in Obsidian), each one gets transferred in full to TrueNAS. This is a performance consideration on large vaults, not a data-loss risk.
+
+### `scripts/apfs-snapshot.sh` — local APFS clone snapshots
+
+For instant, near-free local versioning, use `apfs-snapshot.sh`:
+
+```bash
+# Create a snapshot of your vault (near-instantaneous on APFS)
+scripts/apfs-snapshot.sh
+
+# Preview what would happen without making changes
+scripts/apfs-snapshot.sh --dry-run
+
+# Keep only the 5 most recent snapshots
+scripts/apfs-snapshot.sh --keep 5
+
+# Specify a custom vault and destination
+scripts/apfs-snapshot.sh --vault ~/MyVault --dest ~/Backups/vault-snap-$(date +%Y%m%d)
+```
+
+Snapshots land in `~/.claude-bridge-backups/vault-snapshots/YYYYMMDD-HHMMSS/`. On a same-volume APFS snapshot, apparent size equals the full vault but on-disk usage is near zero until files diverge.
+
+The script verifies that source and destination are on the same APFS volume before running. If they're on different volumes, it warns you (the clone still happens, but as a full copy).
+
+### Layered backup strategy
+
+| Layer | Tool | What it gives you |
+|---|---|---|
+| Local instant versioning | `scripts/apfs-snapshot.sh` (weekly or before risky ops) | Near-free time-travel; ~1s to create; same-volume APFS |
+| Off-device resilience | `daemons/truenas-sync` (rsync over SSH) | Device-loss protection; transfers actual bytes to TrueNAS/NAS |
+| Cross-device sync | Obsidian Sync / Syncthing | Live notes across MacBook, iPad, iPhone |
+
+These three layers are complementary. APFS snapshots handle "I just reorganized my vault and broke something"; TrueNAS rsync handles "my Mac died"; Obsidian Sync handles "I'm writing on my phone".
+
+### Known gotcha: `cp` without `-c`
+
+If you copy files between two directories that are both on the same APFS volume using `cp` (without `-c`), you get a **full copy** — no clone optimization. Users often learn this the hard way when a "quick duplicate" unexpectedly consumes gigabytes.
+
+```bash
+cp file.md copy.md          # full copy (no clone)
+cp -c file.md copy.md       # clone (near-zero cost on same APFS volume)
+cp -cR vault/ vault-backup/ # recursive clone of entire directory tree
+```
+
+### Diagnosing clone savings
+
+```bash
+# Check whether your vault has clone savings and how large they are
+scripts/apfs-clone-status.sh
+
+# Or point at any path
+scripts/apfs-clone-status.sh ~/Library/Mobile\ Documents/
+```
+
+### Further reading
+
+- `man clonefile` — the Apple developer man page for the underlying syscall
+- WWDC 2016 "What's New in the APFS File System" — covers copy-on-write semantics in depth
+- Apple Technical Note TN3111: APFS at a glance
+
 ## iCloud-synced vault caveats
 
 If your vault is under `~/Library/Mobile Documents/`, iCloud may:

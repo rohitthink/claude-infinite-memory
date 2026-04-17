@@ -687,6 +687,10 @@ if [[ $FLAG_BOOTSTRAP == 0 && "$(uname -s)" == "Darwin" ]]; then
 fi
 echo "  3. Subscribe to Obsidian Sync if multi-device needed."
 echo "  4. Run Python indexer: python3 $CLAUDE_BRIDGE_HOME/mcp-servers/obsidian-brain/indexer.py"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  echo "  5. (macOS) Run scripts/apfs-snapshot.sh weekly or before risky vault operations."
+  echo "     It creates a near-instantaneous clone-backed snapshot via clonefile(2) — essentially free on APFS."
+fi
 echo
 echo "To uninstall: $REPO_DIR/uninstall.sh --dry-run"
 echo "Data protection: $REPO_DIR/docs/gdpr.md — what's stored, how to export (gdpr-export.sh), how to delete (gdpr-delete.sh)"
