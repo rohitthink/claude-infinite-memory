@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent plist template for the truenas-sync watchdog.
+
+  Runs every 15 minutes and fires a macOS notification if the backup
+  heartbeat is stale while the vault has recent write activity.
+
+  IMPORTANT: The plist file itself must live on the boot drive
+  (~/Library/LaunchAgents/). See docs/macos-specific.md for details.
+
+  Before loading, substitute:
+    {{LABEL_PREFIX}}         reverse-DNS prefix, e.g. com.github.yourhandle
+    {{WATCHDOG_PATH}}        absolute path to truenas-sync-watchdog.sh
+    {{CLAUDE_BRIDGE_HOME}}   absolute path, e.g. /Users/you/.claude
+    {{CLAUDE_BRIDGE_VAULT}}  absolute path to your Obsidian vault
+
+  The install.sh script performs these substitutions automatically.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{{LABEL_PREFIX}}.truenas-sync-watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{{WATCHDOG_PATH}}</string>
+    </array>
+
+    <!-- Run every 15 minutes (900 seconds). -->
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>15</integer>
+
+    <key>StandardOutPath</key>
+    <string>{{CLAUDE_BRIDGE_HOME}}/logs/truenas-sync-watchdog-stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{{CLAUDE_BRIDGE_HOME}}/logs/truenas-sync-watchdog-stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>CLAUDE_BRIDGE_HOME</key>
+        <string>{{CLAUDE_BRIDGE_HOME}}</string>
+        <key>CLAUDE_BRIDGE_VAULT</key>
+        <string>{{CLAUDE_BRIDGE_VAULT}}</string>
+    </dict>
+</dict>
+</plist>

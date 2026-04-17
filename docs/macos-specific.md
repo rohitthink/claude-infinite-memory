@@ -73,6 +73,38 @@ If your `$CLAUDE_BRIDGE_VAULT` is on an external drive, disconnecting the drive 
 
 The reconciliation daemon will retry the affected session once the volume remounts and the next scan runs (up to 5 min later).
 
+## fswatch crashes on directory reparenting / remount events
+
+**Symptom**: `--watch` mode silently stops syncing after an external drive is unmounted and remounted, or after macOS directory reparenting (e.g., iCloud eviction, Spotlight reindex, Time Machine snapshot). The daemon process stays alive but rsync never fires again.
+
+**Root cause**: `fswatch` uses the macOS `FSEvents` API. When a watched directory's underlying volume is remounted or its inode changes (reparenting event), `FSEvents` delivers a `kFSEventStreamEventFlagRootChanged` event — and older versions of fswatch (< 1.17) respond by shutting down their event stream entirely. The stream write end closes, the bash pipe reading it gets EOF, and the sync loop spins silently doing nothing.
+
+**How the supervisor loop recovers**: Since version W3, `--watch` mode wraps the `fswatch` process substitution in an outer supervisor loop:
+
+```
+while true; do
+  start fswatch
+  run inner debounce loop until fswatch pipe closes (EOF detected by timing)
+  log "fswatch exited; restarting after backoff"
+  sleep (exponential backoff: 5s, 10s, 15s, 20s, 25s, then capped at 30s)
+  check vault still mounted
+done
+```
+
+The inner loop distinguishes "debounce timeout" (fswatch alive, no events for 10 s) from "pipe EOF" (fswatch died) by measuring how quickly `read -t` returns: a return well under `DEBOUNCE_SEC/2` indicates a closed pipe. On detection, it `break`s to the outer supervisor which restarts fswatch after backoff. The backoff counter resets if the session ran for more than 100 s, so a one-off remount event doesn't cause permanently long delays.
+
+Upgrading fswatch to 1.17+ (via `brew upgrade fswatch`) greatly reduces the frequency of these crashes, but the supervisor makes the daemon resilient regardless of fswatch version.
+
+**How the watchdog alerts when rsync stops**: After every successful rsync the daemon writes a Unix timestamp to `~/.claude/sync-state/truenas-sync-heartbeat.txt`. A separate watchdog script (`scripts/truenas-sync-watchdog.sh`) runs every 15 minutes via a dedicated LaunchAgent. It:
+
+1. Reads the heartbeat timestamp.
+2. Computes `age = now − last_heartbeat`.
+3. If `age > 30 min` **and** the vault has files modified in the last 30 min (live activity), fires a macOS notification:
+   > TrueNAS backup stale 35m (12 vault file(s) changed in last 30m)
+4. Appends the alert to `logs/truenas-sync-watchdog-alerts.log` for persistent audit.
+
+The two-condition gate (stale heartbeat **and** recent vault activity) avoids false alarms during legitimate quiet periods (overnight, when no Obsidian notes are being written).
+
 ## iCloud-synced vault caveats
 
 If your vault is under `~/Library/Mobile Documents/`, iCloud may:

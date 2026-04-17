@@ -254,6 +254,29 @@ else
   warn "  output head: $(echo "$SMOKE_OUT" | head -c 200)"
 fi
 
+# ---- fswatch version check ----
+if [[ -n "$CLAUDE_BRIDGE_TRUENAS_HOST" ]]; then
+  _fswatch_bin="${FSWATCH_BIN:-/opt/homebrew/bin/fswatch}"
+  if [[ ! -x "$_fswatch_bin" ]]; then
+    _fswatch_bin="$(command -v fswatch 2>/dev/null || echo "")"
+  fi
+  if [[ -n "$_fswatch_bin" && -x "$_fswatch_bin" ]]; then
+    _fswatch_ver=$("$_fswatch_bin" --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
+    _fswatch_major="${_fswatch_ver%%.*}"
+    _fswatch_rest="${_fswatch_ver#*.}"
+    _fswatch_minor="${_fswatch_rest%%.*}"
+    if [[ -n "$_fswatch_major" && -n "$_fswatch_minor" ]] && \
+       (( _fswatch_major < 1 || ( _fswatch_major == 1 && _fswatch_minor < 17 ) )); then
+      warn "fswatch ${_fswatch_ver} is older than 1.17 — upgrade for better macOS directory-reparenting behavior"
+      warn "  Run: brew upgrade fswatch"
+    else
+      ok "fswatch version: ${_fswatch_ver:-unknown}"
+    fi
+  else
+    warn "fswatch not found — required for --watch mode (brew install fswatch)"
+  fi
+fi
+
 # ---- LaunchAgents ----
 if [[ "$(uname -s)" == "Darwin" ]] && ask_yn "Bootstrap macOS LaunchAgents now?" Y; then
   info "Bootstrapping LaunchAgents"
@@ -362,6 +385,25 @@ EOF
       "$REPO_DIR/daemons/truenas-sync/com.example.obsidian-truenas-sync.plist.template" \
       "${CLAUDE_BRIDGE_LABEL_PREFIX}.obsidian-truenas-sync" \
       "$CLAUDE_BRIDGE_HOME/daemons/truenas-sync/obsidian-truenas-sync.sh"
+
+    # Also install the watchdog that alerts when backups go stale.
+    # install_plist uses $3 as {{DAEMON_PATH}}; reuse that slot for {{WATCHDOG_PATH}}.
+    sed \
+      -e "s|{{LABEL_PREFIX}}|${CLAUDE_BRIDGE_LABEL_PREFIX}|g" \
+      -e "s|{{CLAUDE_BRIDGE_HOME}}|${CLAUDE_BRIDGE_HOME}|g" \
+      -e "s|{{CLAUDE_BRIDGE_VAULT}}|${CLAUDE_BRIDGE_VAULT}|g" \
+      -e "s|{{WATCHDOG_PATH}}|$CLAUDE_BRIDGE_HOME/scripts/truenas-sync-watchdog.sh|g" \
+      "$REPO_DIR/daemons/truenas-sync/com.example.truenas-sync-watchdog.plist.template" \
+      > "$LA_DIR/${CLAUDE_BRIDGE_LABEL_PREFIX}.truenas-sync-watchdog.plist"
+    if /usr/bin/plutil -lint "$LA_DIR/${CLAUDE_BRIDGE_LABEL_PREFIX}.truenas-sync-watchdog.plist" >/dev/null 2>&1; then
+      ok "plist valid: ${CLAUDE_BRIDGE_LABEL_PREFIX}.truenas-sync-watchdog.plist"
+      launchctl bootout gui/$(id -u)/"${CLAUDE_BRIDGE_LABEL_PREFIX}.truenas-sync-watchdog" 2>/dev/null || true
+      launchctl bootstrap gui/$(id -u) "$LA_DIR/${CLAUDE_BRIDGE_LABEL_PREFIX}.truenas-sync-watchdog.plist" 2>/dev/null && \
+        ok "bootstrapped: ${CLAUDE_BRIDGE_LABEL_PREFIX}.truenas-sync-watchdog" || \
+        warn "watchdog bootstrap failed (may need Full Disk Access for Terminal)"
+    else
+      warn "plist lint failed: ${CLAUDE_BRIDGE_LABEL_PREFIX}.truenas-sync-watchdog.plist"
+    fi
   fi
 fi
 
