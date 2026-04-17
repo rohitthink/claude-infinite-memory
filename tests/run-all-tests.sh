@@ -166,6 +166,17 @@ run_suite() {
     printf '%-60s PASS  (%ds)\n' "$label" "$elapsed"
     rm -f "$log"
     return 0
+  elif (( rc == 77 )); then
+    # Autoconf convention: a suite may exit 77 to mean "SKIP — environment
+    # or install-state prerequisites are not met" (e.g., the suite needs a
+    # vault path, an installed daemon, etc.). Differs from macOS-only skip
+    # above in that the test itself chose to skip at runtime.
+    printf '%-60s %s\n' "$label" "SKIP (needs env/deps)"
+    local reason
+    reason=$(grep -m1 '^SKIP: ' "$log" 2>/dev/null || true)
+    [[ -n "$reason" ]] && printf '       └─ %s\n' "$reason"
+    rm -f "$log"
+    return 3
   else
     printf '%-60s FAIL  (%ds, rc=%d)\n' "$label" "$elapsed" "$rc"
     printf '       └─ tail of output (%s):\n' "$log"
@@ -195,6 +206,10 @@ for entry in "${SUITES[@]}"; do
     2)
       (( SKIPPED++ ))
       SKIPPED_NAMES+=("$path (macOS-only)")
+      ;;
+    3)
+      (( SKIPPED++ ))
+      SKIPPED_NAMES+=("$path (needs env/deps)")
       ;;
     *)
       (( FAILED++ ))

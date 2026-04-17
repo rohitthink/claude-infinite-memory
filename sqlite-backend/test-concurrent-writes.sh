@@ -19,8 +19,8 @@ TEST_DB_BACKUP=""
 REAL_DB="$BACKEND_DIR/vault-staging.db"
 
 if [[ ! -x "$INGEST" ]]; then
-  echo "FAIL: ingest.sh not found at $INGEST"
-  exit 1
+  echo "SKIP: ingest.sh not found at $INGEST (sqlite-backend not installed; test is only meaningful on an installed system)"
+  exit 77   # Autoconf skip convention; harness interprets as SKIP
 fi
 
 # Move real DB aside (if present) so the test gets a fresh one.

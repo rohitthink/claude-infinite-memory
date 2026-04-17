@@ -25,8 +25,8 @@ BRAIN_DIR="${CLAUDE_BRIDGE_HOME}/mcp-servers/obsidian-brain"
 LOG="/tmp/obsidian-brain-test.log"
 
 if [[ -z "${CLAUDE_BRIDGE_VAULT:-}" ]]; then
-  echo "ERROR: CLAUDE_BRIDGE_VAULT env var must be set to your vault path"
-  exit 1
+  echo "SKIP: CLAUDE_BRIDGE_VAULT env var not set (this test indexes a real vault; not meaningful on CI)"
+  exit 77   # Autoconf skip convention; harness interprets as SKIP
 fi
 
 fail() {
