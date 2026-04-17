@@ -1,5 +1,21 @@
 # FAQ
 
+### 0. How do I tune the MCP chunk cap for my vault?
+
+The MCP server uses file-type-aware per-file chunk caps when returning
+`search_vault` results. Four env vars control the caps:
+
+| Env var | Default | Applies to |
+|---|---|---|
+| `CLAUDE_BRIDGE_MAX_CHUNKS_DEFAULT` | 2 | All files not matched below |
+| `CLAUDE_BRIDGE_MAX_CHUNKS_HISTORICAL` | 8 | `07 - Claude Knowledge/Historical Summaries/*` |
+| `CLAUDE_BRIDGE_MAX_CHUNKS_MOC` | 6 | `07 - Claude Knowledge/MOCs/*` |
+| `CLAUDE_BRIDGE_MAX_CHUNKS_PROPOSAL` | 5 | Any file ending in `.proposed.md` |
+
+Set them in your shell environment or in the wrapper that launches the
+MCP server. The default of 2 for scattered files is an embedding-poisoning
+defense; do not raise it globally without understanding the risk.
+
 ### 1. Is my vault content sent to Anthropic?
 
 Only when the SessionEnd hook's `claude -p` child runs  that child sends
